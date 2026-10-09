@@ -19,6 +19,7 @@ import {
   USB, DATA, PHOME, PLAT, IS_WIN,
   claudeBinary, buildEnv, probe, loadProviders, freeSpace, C,
   authHeaders, normalizeBaseUrl,
+  resolveWorkdir, readDaemon, writeDaemon, expandHome,
 } from './launch.mjs'
 import {
   getSecret, setSecretEntry, removeSecretEntry, listSecretNames, hasPassfile,
@@ -45,6 +46,7 @@ const state = {
   doctorOut: null,
   probing: false,
   models: null,           // 模型选择界面:{ providerId, list, url, cursor }
+  workdir: null,          // { dir, src } 这次会话在哪工作
   inputLock: false,       // 正在用 readline 提问时,忽略自己的按键处理
   active: false,
   cfg: null,
@@ -151,6 +153,13 @@ function trunc(s, n) {
   return out
 }
 const cut = trunc   // 同名保留,便于阅读
+
+/** 把家目录缩写显示,省地方 */
+const shortenHome = (p) => {
+  if (!p) return ''
+  const h = os.homedir()
+  return p.startsWith(h) ? '~' + p.slice(h.length) : p
+}
 const dim = (s) => `\x1b[2m${s}\x1b[0m`
 const bold = (s) => `\x1b[1m${s}\x1b[0m`
 const cyan = (s) => `\x1b[36m${s}\x1b[0m`
@@ -343,6 +352,7 @@ function bodyMain(IW, IH) {
     `${dim('RUNTIME')}   node ${bold(process.version)}  ${dim('·')}  claude-code ${bold(ccVersion())}${bin ? '' : red('  ✗ 本平台未装')}`,
     `${dim('MODEL')}     ${bold(p.model || '(未选模型)')}  ${dim('via')} ${cut(p.name, 30)}`,
     `${dim('BALANCE')}   ${balanceText(p)}`,
+    `${dim('WORKDIR')}   ${cut(shortenHome(state.workdir?.dir || ''), Math.max(20, IW - 20))}  ${dim('按 7 修改')}`,
     `${dim('CAPACITY')}  ${dim('小模型')} ${p.haiku_model || p.model}  ${dim('·')} ${dim('上下文')} ${ctx}  ${dim('·')} ${dim('密钥')} ${p.key_ref ? (hasKey ? green('● 就绪') : red('✗ 未录入')) : dim('不需')}`,
   ]
 
@@ -353,6 +363,7 @@ function bodyMain(IW, IH) {
     ['密钥管理', `${keys.length} 个密钥`],
     ['体检与修复', '10 项检查'],
     ['关于 / 版本', ''],
+    ['工作目录', state.workdir?.src || ''],
   ]
 
   // 分隔线 + 页脚 + 菜单是硬需求,先扣掉,剩下的才给 logo 和系统信息
@@ -566,7 +577,7 @@ function box(body, W, H, title) {
  * 所有动作键大小写都接受(见 handleKey),写大写会误导人。
  */
 const HINTS = {
-  main: '1-6 选择   ↑↓ 导航   Enter 确认   q 退出',
+  main: '1-7 选择   ↑↓ 导航   Enter 确认   q 退出',
   providers: 'Enter 当前   m 选模型   n 手填模型   x 鉴权   a 新增   e 改   d 删   Esc 返回',
   models: '↑↓ 选择   Enter 使用   i 手动输入   Esc 返回',
   keys: '↑↓ 选择   a 录入   d 删除   Esc 返回',
@@ -692,8 +703,9 @@ async function actionLaunch() {
   state.message = null
   exitScreen()                       // 把终端还给 Claude Code
   const env = buildEnv(p, secret)
-  fs.mkdirSync(path.join(DATA, 'workspace'), { recursive: true })
-  const child = spawn(bin, [], { cwd: path.join(DATA, 'workspace'), env, stdio: 'inherit' })
+  const wd = state.workdir?.dir || path.join(DATA, 'workspace')
+  try { fs.mkdirSync(wd, { recursive: true }) } catch {}
+  const child = spawn(bin, [], { cwd: wd, env, stdio: 'inherit' })
   // 必须同时监听 error:否则 spawn 失败时 exit 不触发,面板会永久挂起
   let spawnErr = null
   await new Promise((res) => {
@@ -875,6 +887,43 @@ function actionToggleAuth() {
   render()
 }
 
+/**
+ * 设置这次会话的工作目录(会被记住)。
+ *
+ * 用途:U 盘插到**另一台电脑**上时,通常是要操作那台电脑上的项目,
+ * 而不是盘内的 data/workspace。Claude Code 的 `cd` 在会话内不持久,
+ * 所以必须在**启动时**把工作目录定对,而不是进去之后再 cd。
+ */
+async function actionSetWorkdir() {
+  const cur = state.workdir?.dir || ''
+  try {
+    const ans = await prompt('工作目录(绝对路径,支持 ~):', {
+      hint: `当前 ${shortenHome(cur)} · 留空 = 取消 · 输入 - = 回到盘内默认`,
+    })
+    if (!ans) { state.message = { t: '未改动', lv: 'warn' }; return }
+    const daemon = readDaemon()
+    if (ans === '-') {
+      delete daemon.cwd
+      writeDaemon(daemon)
+      state.workdir = resolveWorkdir()
+      state.message = { t: `工作目录已回到盘内默认:${shortenHome(state.workdir.dir)}`, lv: 'ok' }
+      return
+    }
+    const abs = expandHome(ans)
+    let ok = false
+    try { ok = fs.statSync(abs).isDirectory() } catch {}
+    if (!ok) { state.message = { t: `不存在或不是目录:${abs}`, lv: 'fail' }; return }
+    daemon.cwd = abs
+    writeDaemon(daemon)
+    state.workdir = resolveWorkdir()
+    state.message = { t: `工作目录已设为 ${shortenHome(abs)}(已记住)`, lv: 'ok' }
+  } catch (e) {
+    state.message = { t: '设置失败:' + (e && e.message ? e.message : e), lv: 'fail' }
+  } finally {
+    render()
+  }
+}
+
 /** 在模型界面回车:第 0 行是手动输入,其余把选中的模型写进配置 */
 function actionSelectModel() {
   const M = state.models
@@ -1013,7 +1062,7 @@ function actionDoctor() {
 }
 
 // ───────────────────────── 按键处理 ─────────────────────────
-const MAIN_ITEMS = 6
+const MAIN_ITEMS = 7
 function handleKey(s) {
   if (state.inputLock) return
   if (s === '\x03') { quit(); return }   // Ctrl-C
@@ -1090,6 +1139,7 @@ function doMain() {
   else if (state.cursor === 3) { state.screen = 'keys'; state.kCursor = 0 }
   else if (state.cursor === 4) { state.screen = 'doctor'; actionDoctor() }
   else if (state.cursor === 5) state.screen = 'about'
+  else if (state.cursor === 6) actionSetWorkdir()
 }
 
 function quit() {
@@ -1099,8 +1149,9 @@ function quit() {
 }
 
 // ───────────────────────── 入口 ─────────────────────────
-export async function runTUI() {
+export async function runTUI(opts = {}) {
   state.cfg = loadProviders()
+  state.workdir = opts.workdir || resolveWorkdir()
   // 兼容旧写法:确保 current 有效
   if (!state.cfg.providers.some((p) => p.id === state.cfg.current)) {
     state.cfg.current = state.cfg.providers[0].id
@@ -1127,6 +1178,7 @@ if (RENDER_ONLY) {
     state.cfg.current = state.cfg.current || state.cfg.providers[0].id
     const scr = a[2] || 'main'
     state.screen = scr
+    state.workdir = resolveWorkdir()   // 预览也要有工作目录,否则 WORKDIR 行是空的
     if (scr === 'main') await ensureBalance()   // 让预览里的余额是真实值
     if (scr === 'models') {                     // 预览也走与真实流程一致的逻辑
       const p = currentProvider()

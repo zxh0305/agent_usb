@@ -12,10 +12,16 @@
  *   node tools/launch.mjs --list                 列出供应商
  *   node tools/launch.mjs --check                只体检不启动(验证端点/密钥/模型)
  *
+ * 工作目录(默认是盘内的 data/workspace):
+ *   node tools/launch.mjs --cwd ~/my-project     指定这次在哪工作
+ *   node tools/launch.mjs --here                 用启动时 shell 所在的目录
+ *   面板主菜单第 7 项可以改,并且会被记住(存在 data/config/daemon.json)
+ *
  * 注意:供应商开关是 --provider(不是 -p),因为 -p 是 Claude Code 自己的
  * "非交互打印模式",必须留给它。
  */
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline'
 import { spawn, spawnSync } from 'node:child_process'
@@ -40,6 +46,52 @@ export const IS_WIN = OS === 'win32'
 function passthroughRoot() {
   const p = process.env.SYSTEMROOT || process.env.SystemRoot || 'C:\\Windows'
   return IS_WIN ? p : '/'
+}
+
+// ────────────────────── 工作目录 ──────────────────────
+const DAEMON_FILE = path.join(DATA, 'config', 'daemon.json')
+
+export function expandHome(p) {
+  if (!p) return p
+  if (p === '~') return os.homedir()
+  if (p.startsWith('~/') || p.startsWith('~\\')) return path.join(os.homedir(), p.slice(2))
+  return path.resolve(p)
+}
+
+export function readDaemon() {
+  try { return JSON.parse(fs.readFileSync(DAEMON_FILE, 'utf8')) } catch { return {} }
+}
+export function writeDaemon(obj) {
+  fs.mkdirSync(path.dirname(DAEMON_FILE), { recursive: true })
+  fs.writeFileSync(DAEMON_FILE, JSON.stringify(obj, null, 2) + '\n')
+}
+
+/**
+ * 决定这次会话在哪个目录里工作。
+ *
+ * 优先级(先命中且确实存在的目录胜出):
+ *   1. 命令行 --cwd <目录>
+ *   2. 命令行 --here(用启动时 shell 所在的目录)
+ *   3. 面板里保存过的设置(data/config/daemon.json)
+ *   4. 盘内默认 data/workspace
+ *
+ * 之所以要能改:U 盘插到别的电脑上时,常常是要操作**那台电脑上**的项目,
+ * 而不是盘内的目录。写死在盘内会让 Claude Code 的 cd 无效、只能一路用绝对路径。
+ */
+export function resolveWorkdir({ cli = null, here = false } = {}) {
+  const fallback = path.join(DATA, 'workspace')
+  const list = []
+  if (cli) list.push({ p: cli, src: '--cwd 指定' })
+  if (here) list.push({ p: process.cwd(), src: '启动时所在目录' })
+  const saved = readDaemon().cwd
+  if (saved) list.push({ p: saved, src: '面板里保存的' })
+  list.push({ p: fallback, src: '盘内默认' })
+
+  for (const c of list) {
+    const p = expandHome(String(c.p))
+    try { if (fs.statSync(p).isDirectory()) return { dir: p, src: c.src } } catch {}
+  }
+  return { dir: fallback, src: '盘内默认' }
 }
 
 /**
@@ -318,6 +370,10 @@ async function main() {
 
   const cfg = loadProviders()
 
+  // 这次在哪个目录工作(--cwd / --here / 已保存的设置 / 盘内默认)
+  const ci = own.findIndex((a) => a === '--cwd' || a === '-C')
+  const workdir = resolveWorkdir({ cli: ci >= 0 ? own[ci + 1] : null, here: own.includes('--here') })
+
   if (own.includes('--list')) {
     console.log('\n  已配置的供应商:')
     for (const p of cfg.providers) {
@@ -333,7 +389,7 @@ async function main() {
   const hasProviderFlag = own.some((a) => a === '--provider' || a === '-P')
   if (!hasProviderFlag && !own.includes('--check') && !own.includes('--no-tui') && process.stdin.isTTY) {
     const { runTUI } = await import('./tui.mjs')
-    await runTUI()
+    await runTUI({ workdir })
     return
   }
 
@@ -394,16 +450,16 @@ async function main() {
   header()
   console.log(`\n  供应商  ${C.b(provider.name)}  ${C.dim('(' + provider.id + ')')}`)
   console.log(`  模型    ${C.b(provider.model)}   ${C.dim('· 小模型 ' + (provider.haiku_model || provider.model))}`)
-  console.log(`  工作区  ${C.dim(path.join(DATA, 'workspace'))}`)
+  console.log(`  工作区  ${C.dim(workdir.dir)}  ${C.dim('(' + workdir.src + ')')}`)
   console.log(`  密钥    ${secret ? C.g('● 已注入') : C.y('○ 无')}`)
   console.log(`\n  ${C.dim('启动 Claude Code…(首次会问是否信任该工作目录,选 yes 即可)')}\n`)
 
   fs.mkdirSync(TMP, { recursive: true })
-  fs.mkdirSync(path.join(DATA, 'workspace'), { recursive: true })
+  try { fs.mkdirSync(workdir.dir, { recursive: true }) } catch {}
 
   const env = buildEnv(provider, secret)
   const child = spawn(bin, rest, {
-    cwd: path.join(DATA, 'workspace'),
+    cwd: workdir.dir,
     env,
     stdio: 'inherit',
   })
