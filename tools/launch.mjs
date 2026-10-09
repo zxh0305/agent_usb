@@ -110,6 +110,33 @@ export function writeDaemon(obj) {
 }
 
 /**
+ * 面板上显示的名字(点阵 logo 用它)。
+ * 它不再是某个 agent 的名字 —— 这个面板是**多 agent 启动器**,
+ * 大字写 "CLAUDE" 会让人以为只能跑 Claude Code。
+ * 想改名就在 data/config/daemon.json 里加 "title": "你的名字"。
+ */
+export function appName() {
+  const t = readDaemon().title
+  return (typeof t === 'string' && t.trim()) ? t.trim().toUpperCase() : 'REMON'
+}
+
+// 极简的显示宽度(中文算 2 列)。
+// ⚠ 不能用 String.prototype.padEnd:它按 **码元** 计数,而「盘剩余」这种中文
+// 是 3 个字、占 6 列 —— 用它对齐会让右边框外移(面板里踩过同一个坑)。
+const stripAnsiL = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+const dwidth = (s) => {
+  let n = 0
+  for (const ch of stripAnsiL(s)) {
+    const c = ch.codePointAt(0)
+    n += ((c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0xa4cf) ||
+          (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xff00 && c <= 0xff60) ||
+          (c >= 0xffe0 && c <= 0xffe6)) ? 2 : 1
+  }
+  return n
+}
+const padTo = (s, w) => s + ' '.repeat(Math.max(0, w - dwidth(s)))
+
+/**
  * 决定这次会话在哪个目录里工作。
  *
  * 优先级(先命中且确实存在的目录胜出):
@@ -501,12 +528,12 @@ function header(row) {
     ? fs.readFileSync(path.join(USB, 'app', 'claude', 'VERSION'), 'utf8').trim() : '未安装'
   console.log()
   console.log(C.cyan('  ┌' + '─'.repeat(62) + '┐'))
-  console.log(C.cyan('  │') + C.b('  随 身 A G E N T 盘  ·  CLAUDE STATION') + ' '.repeat(22) + C.cyan('│'))
+  console.log(C.cyan('  │') + C.b(padTo(`  随 身 A G E N T 盘  ·  ${appName()}`, 62)) + C.cyan('│'))
   console.log(C.cyan('  ├' + '─'.repeat(62) + '┤'))
-  console.log(C.cyan('  │') + `  RUNTIME   node ${process.version}  (${PLAT || '未知平台'})`.padEnd(62) + C.cyan('│'))
-  console.log(C.cyan('  │') + `  APP       claude-code ${ver}`.padEnd(62) + C.cyan('│'))
-  console.log(C.cyan('  │') + `  盘剩余    ${freeSpace()}`.padEnd(62) + C.cyan('│'))
-  if (!bin) console.log(C.cyan('  │') + C.r(`  ⚠ 本平台(${PLAT})的 Claude Code 未安装,请先跑 tools/build-local.sh`) + C.cyan('│'))
+  console.log(C.cyan('  │') + padTo(`  RUNTIME   node ${process.version}  (${PLAT || '未知平台'})`, 62) + C.cyan('│'))
+  console.log(C.cyan('  │') + padTo(`  APP       claude-code ${ver}`, 62) + C.cyan('│'))
+  console.log(C.cyan('  │') + padTo(`  盘剩余    ${freeSpace()}`, 62) + C.cyan('│'))
+  if (!bin) console.log(C.cyan('  │') + padTo(C.r(`  ⚠ 本平台(${PLAT})的 Claude Code 未安装,请先跑 tools/build-local.sh`), 62) + C.cyan('│'))
   console.log(C.cyan('  └' + '─'.repeat(62) + '┘'))
 }
 

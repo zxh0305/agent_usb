@@ -20,7 +20,7 @@ import {
   claudeBinary, buildEnv, probe, loadProviders, freeSpace, C,
   authHeaders, normalizeBaseUrl,
   resolveWorkdir, readDaemon, writeDaemon, expandHome,
-  loadAgents, saveAgents, prepareAgent, purgeStaleAichatConfig,
+  loadAgents, saveAgents, prepareAgent, purgeStaleAichatConfig, appName,
 } from './launch.mjs'
 import {
   getSecret, setSecretEntry, removeSecretEntry, listSecretNames, hasPassfile,
@@ -49,6 +49,7 @@ const state = {
   models: null,           // 模型选择界面:{ providerId, list, url, cursor }
   workdir: null,          // { dir, src } 这次会话在哪工作
   agents: null,           // agent 注册表(loadAgents 读出)
+  appName: null,          // 面板显示的名字(默认 REMON,可被 daemon.json 的 title 覆盖)
   inputLock: false,       // 正在用 readline 提问时,忽略自己的按键处理
   active: false,
   cfg: null,
@@ -179,12 +180,16 @@ const FONT = {
   U: ['██  ██', '██  ██', '██  ██', '██  ██', '██████'],
   D: ['█████ ', '██  ██', '██  ██', '██  ██', '█████ '],
   E: ['██████', '██    ', '████  ', '██    ', '██████'],
+  R: ['█████ ', '██  ██', '█████ ', '██ ██ ', '██  ██'],
+  M: ['██  ██', '██████', '██  ██', '██  ██', '██  ██'],
+  O: ['██████', '██  ██', '██  ██', '██  ██', '██████'],
+  N: ['██  ██', '███ ██', '██ ███', '██  ██', '██  ██'],
 }
 function bigText(str) {
   const rows = ['', '', '', '', '']
   for (const ch of str.toUpperCase()) {
     const g = FONT[ch]
-    if (!g) { for (let i = 0; i < 5; i++) rows[i] += '  '; continue }
+    if (!g) { for (let i = 0; i < 5; i++) rows[i] += '  '; continue }   // 没有的字模留空,不至于崩
     for (let i = 0; i < 5; i++) rows[i] += g[i] + ' '
   }
   return rows.map((r) => r.replace(/\s+$/, ''))
@@ -456,7 +461,7 @@ function bodyMain(IW, IH) {
     ['运行时', `node ${process.version}`],
   ].map(([k, v]) => `${dim(padE(k, 8))} ${v}`)
 
-  const big = bigText('CLAUDE')
+  const big = bigText(state.appName || 'REMON')
   const bigW = Math.max(...big.map(vlen))
   const hb = IH - menuRows.length - 3          // 空行 + 分隔线 + 页脚
   let header = []
@@ -464,7 +469,8 @@ function bodyMain(IW, IH) {
     const rows = Math.min(Math.max(big.length, status.length), hb)
     for (let i = 0; i < rows; i++) header.push(padE(big[i] ? cyan(big[i]) : '', bigW + 3) + (status[i] || ''))
   } else if (hb >= 2) {
-    header = [`${bold(cyan('C L A U D E'))}  ${dim('随身 Agent 盘')}   ${status[0] || ''}`]
+    const sp = (state.appName || 'REMON').split('').join(' ')
+    header = [`${bold(cyan(sp))}  ${dim('随身 Agent 盘')}   ${status[0] || ''}`]
   }
 
   // 多余行分一半放在状态与菜单之间、一半放在菜单与底栏之间,免得中间一个空洞
@@ -582,7 +588,7 @@ function bodyModels(IW, IH) {
 /** 关于屏 */
 function bodyAbout(IW) {
   const out = []
-  out.push(...bigText('CLAUDE').map((l) => cyan(l)))
+  out.push(...bigText(state.appName || 'REMON').map((l) => cyan(l)))
   out.push('')
   out.push(`${dim('P O R T A B L E   A S S I S T A N T')}`)
   out.push('')
@@ -1293,6 +1299,7 @@ export async function runTUI(opts = {}) {
   state.cfg = loadProviders()
   state.workdir = opts.workdir || resolveWorkdir()
   state.agents = loadAgents()
+  state.appName = appName()
   // 上次若被强杀,aichat 那个含密钥的临时配置会残留 —— 启动时清掉
   if (purgeStaleAichatConfig()) {
     state.message = { t: '已清理上次遗留的 aichat 临时配置(其中含密钥)', lv: 'warn' }
@@ -1325,6 +1332,7 @@ if (RENDER_ONLY) {
     state.screen = scr
     state.workdir = resolveWorkdir()   // 预览也要有工作目录,否则状态栏是空的
     state.agents = loadAgents()
+    state.appName = appName()
     if (scr === 'main') await ensureBalance()   // 让预览里的余额是真实值
     if (scr === 'models') {                     // 预览也走与真实流程一致的逻辑
       const p = currentProvider()
