@@ -1,0 +1,111 @@
+{
+  "$comment": "供应商清单模板。首次运行会自动复制成 providers.json(那份已被 git 忽略,可自由增删自建项)。",
+  "current": "deepseek",
+  "providers": [
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "verified": true,
+      "doc": "https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "key_ref": "deepseek",
+      "model": "deepseek-v4-pro",
+      "haiku_model": "deepseek-flash",
+      "context_tokens": 1048576,
+      "balance": {
+        "url": "https://api.deepseek.com/user/balance",
+        "total": "balance_infos.0.total_balance",
+        "currency": "balance_infos.0.currency"
+      },
+      "extra_env": {
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "786432"
+      }
+    },
+    {
+      "id": "deepseek-flash",
+      "name": "DeepSeek (Flash · 更快更省)",
+      "verified": true,
+      "doc": "https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "key_ref": "deepseek",
+      "model": "deepseek-flash",
+      "haiku_model": "deepseek-flash",
+      "context_tokens": 1048576,
+      "balance": {
+        "url": "https://api.deepseek.com/user/balance",
+        "total": "balance_infos.0.total_balance",
+        "currency": "balance_infos.0.currency"
+      },
+      "extra_env": {
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "786432"
+      }
+    },
+    {
+      "id": "glm",
+      "name": "智谱 GLM",
+      "verified": false,
+      "doc": "https://docs.bigmodel.cn/cn/guide/develop/claude",
+      "base_url": "https://open.bigmodel.cn/api/anthropic",
+      "key_ref": "glm",
+      "model": "glm-5.2",
+      "haiku_model": "glm-4.7",
+      "context_tokens": 1000000,
+      "extra_env": {
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"
+      }
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi / Moonshot",
+      "verified": false,
+      "doc": "https://platform.kimi.com/docs/guide/claude-code-kimi",
+      "base_url": "https://api.moonshot.cn/anthropic",
+      "key_ref": "kimi",
+      "model": "kimi-k3",
+      "haiku_model": "kimi-k2.7-code",
+      "context_tokens": 1000000,
+      "extra_env": {
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"
+      }
+    },
+    {
+      "id": "qwen",
+      "name": "通义 Qwen",
+      "verified": false,
+      "doc": "https://help.aliyun.com/zh/model-studio/claude-code",
+      "base_url": "https://coding.dashscope.aliyuncs.com/apps/anthropic",
+      "key_ref": "qwen",
+      "model": "qwen3.8-max",
+      "haiku_model": "qwen3.8-flash",
+      "context_tokens": 200000,
+      "note": "base_url 随计费方式不同(Coding Plan / Token Plan / 按量),配错是最常见的坑",
+      "extra_env": {}
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax",
+      "verified": false,
+      "doc": "https://platform.minimaxi.com/docs/m-plan/claude-code",
+      "base_url": "https://api.minimax.cn/anthropic",
+      "key_ref": "minimax",
+      "model": "MiniMax-M3.1-Flash-Preview",
+      "haiku_model": "MiniMax-M3.1-Flash-Preview",
+      "context_tokens": 524288,
+      "extra_env": {
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "524288"
+      }
+    },
+    {
+      "id": "siliconflow",
+      "name": "硅基流动 SiliconFlow",
+      "verified": false,
+      "doc": "https://www.siliconflow.cn/docs/api/messages-post",
+      "base_url": "https://api.siliconflow.cn",
+      "key_ref": "siliconflow",
+      "model": "deepseek-ai/DeepSeek-V4-Flash",
+      "haiku_model": "deepseek-ai/DeepSeek-V4-Flash",
+      "context_tokens": 200000,
+      "extra_env": {}
+    }
+  ]
+}

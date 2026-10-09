@@ -1,0 +1,8 @@
+# 统一换行符:脚本按各自平台该有的样子签出
+* text=auto eol=lf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# 仓库里没有二进制产物(见 .gitignore),这里只做兜底
+*.png binary
+*.jpg binary

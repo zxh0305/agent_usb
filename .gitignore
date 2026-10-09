@@ -1,0 +1,31 @@
+# ═══════════ 私密数据:绝对不要提交 ═══════════
+# 密钥库(加密)与它的口令。口令是明文,一旦提交,等于把里面的密钥一起公开。
+data/config/secrets.json
+data/config/passphrase
+# 会话记录、工作区、日志、缓存 —— 会话记录里是你和模型的完整对话
+data/home/
+data/sessions/
+data/workspace/
+data/logs/
+data/cache/
+data/config/last.txt
+
+# ═══════════ 运行时与构建产物 ═══════════
+# 体积很大(Node 约 120MB/平台,Claude Code 约 240MB/平台),
+# 而且可以用 tools/build-local.sh 一键重建,不需要进版本库。
+runtime/
+app/
+tmp/
+
+# ═══════════ 系统与本地工具产生的垃圾 ═══════════
+.DS_Store
+._*
+.Spotlight-V100/
+.fseventsd/
+.Trashes/
+.agent-memory/
+.coding-agent/
+
+# 用户自己的供应商配置(会累积自建项,可能含内网地址),不入库;
+# 仓库只带 providers.example.json 作为模板,首次运行自动复制。
+data/config/providers.json
