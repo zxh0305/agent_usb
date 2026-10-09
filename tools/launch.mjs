@@ -120,6 +120,34 @@ const SHADOW = [
   'CLAUDE_CONFIG_DIR', 'AWS_PROFILE', 'GOOGLE_APPLICATION_CREDENTIALS',
 ]
 
+/** 各家网关的鉴权头不一样:多数认 Authorization: Bearer,少数只认 x-api-key */
+export function authHeaders(provider, secret) {
+  if (!secret) return {}
+  return provider.auth === 'x-api-key'
+    ? { 'x-api-key': secret }
+    : { authorization: `Bearer ${secret}` }
+}
+
+/**
+ * 规范化 Base URL —— 这是接第三方接口最容易错的地方。
+ *
+ * Claude Code 会在 ANTHROPIC_BASE_URL 后面**自动接 `/v1/messages`**,
+ * 所以 base 里不该再出现 `/v1`、`/v1/messages`、`/messages`,否则会拼成
+ * `.../code/v1/v1/messages` 这种 404 路径。
+ *
+ * ⚠️ 别的客户端约定不同:ZCode 的 "Anthropic Messages" 格式是 base + `/messages`,
+ * 所以它的 Base URL 会带 `/v1`。**两边不能照抄。**
+ */
+export function normalizeBaseUrl(raw) {
+  const before = String(raw || '').trim().replace(/\/+$/, '')
+  const url = before
+    .replace(/\/v1\/messages$/i, '')
+    .replace(/\/messages$/i, '')
+    .replace(/\/v1$/i, '')
+    .replace(/\/+$/, '')
+  return { url, changed: url !== before }
+}
+
 export function buildEnv(provider, secret) {
   const env = { ...process.env }
 
@@ -160,7 +188,11 @@ export function buildEnv(provider, secret) {
   // 7) 供应商注入
   if (provider) {
     env.ANTHROPIC_BASE_URL = provider.base_url
-    if (secret) env.ANTHROPIC_AUTH_TOKEN = secret          // Bearer;第三方首选
+    // 两种鉴权方式只能设一个:都设会触发"两个凭证来源"的告警,且优先级不好记
+    if (secret) {
+      if (provider.auth === 'x-api-key') env.ANTHROPIC_API_KEY = secret
+      else env.ANTHROPIC_AUTH_TOKEN = secret
+    }
     env.ANTHROPIC_MODEL = provider.model
     // 声明为"自定义模型":Claude Code 会跳过模型名校验,消除 unrecognized_model 提示
     env.ANTHROPIC_CUSTOM_MODEL_OPTION = provider.model
@@ -205,39 +237,58 @@ function ask(question) {
   })
 }
 
-/** 真实探活:发一个 max_tokens=1 的最小请求,当场验证端点/密钥/模型 */
+/**
+ * 真实探活:发一个 max_tokens=1 的最小请求,当场验证端点 / 密钥 / 模型名。
+ *
+ * 遇到 401/403 会**自动换另一种鉴权方式再试一次**(Bearer ↔ x-api-key),
+ * 并在结果里说明哪种能用 —— 官方建议就是"先 AUTH_TOKEN,401 再换 API_KEY"。
+ */
 export async function probe(provider, secret) {
   if (!provider.base_url) return { ok: false, reason: '没有 base_url' }
+  if (!provider.model) {
+    return { ok: false, reason: '还没选模型(供应商屏按 n 可手动输入模型名)' }
+  }
   const url = provider.base_url.replace(/\/+$/, '') + '/v1/messages'
-  const body = {
+  const body = JSON.stringify({
     model: provider.model,
     max_tokens: 1,
     messages: [{ role: 'user', content: 'hi' }],
+  })
+  const preferred = provider.auth === 'x-api-key' ? 'x-api-key' : 'bearer'
+  const order = [preferred, preferred === 'bearer' ? 'x-api-key' : 'bearer']
+  let last = null
+
+  for (const mode of order) {
+    const headers = { 'content-type': 'application/json', 'anthropic-version': '2023-06-01' }
+    if (secret) {
+      if (mode === 'x-api-key') headers['x-api-key'] = secret
+      else headers.authorization = `Bearer ${secret}`
+    }
+    const t0 = Date.now()
+    let res
+    try {
+      res = await fetch(url, { method: 'POST', headers, body })
+    } catch (e) {
+      return { ok: false, reason: `网络不可达:${e.message}`, url, authUsed: mode }
+    }
+    const ms = Date.now() - t0
+    const text = await res.text()
+    if (res.ok) {
+      return { ok: true, ms, url, model: provider.model, authUsed: mode, switched: mode !== preferred }
+    }
+    let detail = text.slice(0, 300)
+    try { const j = JSON.parse(text); detail = j.error?.message || j.message || detail } catch {}
+    const hint =
+      res.status === 401 ? '密钥不对、或鉴权方式不对(已自动两种都试过)' :
+      res.status === 403 ? '密钥无权访问该模型' :
+      res.status === 404 ? `路径或模型名不对。注意 base 里**不要带 /v1** —— Claude Code 会自己接 /v1/messages,这次实际请求的是 ${url}` :
+      res.status === 400 ? '请求被拒(多为实验性 beta 头;本启动器已默认关闭)' :
+      res.status === 429 ? '余额不足或触发限流' : ''
+    last = { ok: false, status: res.status, reason: detail, hint, url, ms, authUsed: mode }
+    // 只有鉴权类错误才值得换一种方式重试,其它错误换了也一样
+    if (res.status !== 401 && res.status !== 403) return last
   }
-  const headers = {
-    'content-type': 'application/json',
-    'anthropic-version': '2023-06-01',
-  }
-  if (secret) headers['authorization'] = `Bearer ${secret}`
-  const t0 = Date.now()
-  let res
-  try {
-    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
-  } catch (e) {
-    return { ok: false, reason: `网络不可达:${e.message}`, url }
-  }
-  const ms = Date.now() - t0
-  const text = await res.text()
-  if (res.ok) return { ok: true, ms, url, model: provider.model }
-  let detail = text.slice(0, 300)
-  try { const j = JSON.parse(text); detail = j.error?.message || j.message || detail } catch {}
-  const hint =
-    res.status === 401 ? '密钥无效或鉴权方式不对(可试改用 ANTHROPIC_API_KEY)' :
-    res.status === 403 ? '密钥无权访问该模型' :
-    res.status === 404 ? '模型名或端点路径不对' :
-    res.status === 400 ? '请求被拒(多为实验性 beta 头;本启动器已默认关闭)' :
-    res.status === 429 ? '余额不足或触发限流' : ''
-  return { ok: false, status: res.status, reason: detail, hint, url, ms }
+  return last
 }
 
 function header(row) {

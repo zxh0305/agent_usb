@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url'
 import {
   USB, DATA, PHOME, PLAT, IS_WIN,
   claudeBinary, buildEnv, probe, loadProviders, freeSpace, C,
+  authHeaders, normalizeBaseUrl,
 } from './launch.mjs'
 import {
   getSecret, setSecretEntry, removeSecretEntry, listSecretNames, hasPassfile,
@@ -313,9 +314,7 @@ async function ensureBalance(force = false) {
     if (r.ok) secret = r.value
   }
   try {
-    const r = await fetch(p.balance.url, {
-      headers: secret ? { authorization: `Bearer ${secret}` } : {},
-    })
+    const r = await fetch(p.balance.url, { headers: authHeaders(p, secret) })
     const j = await r.json()
     const total = pickPath(j, p.balance.total)
     const cur = p.balance.currency ? pickPath(j, p.balance.currency) : ''
@@ -434,6 +433,7 @@ function bodyProviders(IW) {
     out.push(dim('─'.repeat(IW)))
     out.push(`  ${dim('端点')}  ${cut(cur.base_url, IW - 8)}`)
     out.push(`  ${dim('主模型')} ${cur.model || '(未选)'}    ${dim('小模型')} ${cur.haiku_model || cur.model || '(未选)'}`)
+    out.push(`  ${dim('鉴权')}   ${cur.auth === 'x-api-key' ? 'x-api-key 头' : 'Authorization: Bearer'}   ${dim('(按 x 切换)')}    ${dim('请求路径')} ${cut(`${cur.base_url}/v1/messages`, Math.max(10, IW - 46))}`)
     if (cur.note) out.push(`  ${yellow('注意')}  ${cut(cur.note, IW - 8)}`)
     if (cur.doc) out.push(`  ${dim('文档')}  ${dim(cut(cur.doc, IW - 8))}`)
   }
@@ -460,23 +460,33 @@ function bodyKeys(IW) {
   return out
 }
 
-/** 模型选择屏 */
+/** 模型选择屏。第 0 行固定是"手动输入模型名" ——
+ *  很多第三方网关(如自建中转)并不提供列模型接口,只能手填,
+ *  这和某些客户端里的"+ 添加模型"是一个意思。 */
 function bodyModels(IW, IH) {
   const M = state.models
   const out = []
   if (!M) return out
-  out.push(dim(`来源 ${cut(M.url, IW - 6)}`))
-  out.push('')
   const p = state.cfg.providers.find((x) => x.id === M.providerId)
+  out.push(dim(`接口     ${cut(p ? p.base_url : '', IW - 10)}`))
+  out.push(dim(`列表来源 ${M.url ? cut(M.url, IW - 10) : '(该接口不提供模型列表,请手填)'}`))
+  out.push('')
+
   const ctxW = 6
   const idW = Math.max(18, Math.min(38, Math.floor(IW * 0.42)))
   const labW = Math.max(6, IW - idW - ctxW - 6)
-  const view = Math.max(3, IH - 6)
+  const view = Math.max(3, IH - 7)
   const list = M.list
-  const top = Math.max(0, Math.min(M.cursor - Math.floor(view / 2), list.length - view))
-  for (let i = top; i < Math.min(list.length, top + view); i++) {
-    const m = list[i]
+  const total = list.length + 1          // +1 是手动输入那一行
+  const top = Math.max(0, Math.min(M.cursor - Math.floor(view / 2), total - view))
+  for (let i = top; i < Math.min(total, top + view); i++) {
     const on = i === M.cursor
+    if (i === 0) {
+      const label = '✎ 手动输入模型名'
+      out.push(`${on ? sel('▸') : ' '}   ${on ? sel(padE(label, IW - 8)) : dim(padE(label, IW - 8))}`)
+      continue
+    }
+    const m = list[i - 1]
     const isCur = p && p.model === m.id
     out.push(
       `${on ? sel('▸') : ' '} ${isCur ? green('●') : ' '} ` +
@@ -485,8 +495,8 @@ function bodyModels(IW, IH) {
       `${padS(m.context ? dim(fmtCtx(m.context)) : '', ctxW)}`
     )
   }
-  if (list.length > view) {
-    out.push(dim(`  … 共 ${list.length} 个,当前显示 ${top + 1}-${Math.min(top + view, list.length)}`))
+  if (total > view) {
+    out.push(dim(`  … 共 ${list.length} 个模型,当前 ${top + 1}-${Math.min(top + view, total)}`))
   }
   return out
 }
@@ -554,8 +564,8 @@ function box(body, W, H, title) {
  */
 const HINTS = {
   main: '1-6 选择   ↑↓ 导航   Enter 确认   q 退出',
-  providers: '↑↓ 选择   Enter 设为当前   m 选模型   a 新增   e 改   d 删   k 密钥   Esc 返回',
-  models: '↑↓ 选择   Enter 使用该模型   Esc 返回',
+  providers: '↑↓ 选择   m 拉模型   n 手填   x 鉴权   a 新增   e 改   d 删   Esc 返回',
+  models: '↑↓ 选择   Enter 使用   i 手动输入   Esc 返回',
   keys: '↑↓ 选择   a 录入   d 删除   Esc 返回',
   doctor: '↑↓ 滚动   r 重跑   Esc 返回',
   about: 'Esc 返回',
@@ -566,10 +576,12 @@ function footer(IW) {
   if (state.message) {
     const lv = state.message.lv
     const col = lv === 'ok' ? green : lv === 'fail' ? red : yellow
-    return col(' ' + state.message.t)
+    return col(' ' + trunc(state.message.t, IW - 2))
   }
   const hint = HINTS[state.screen] || ''
-  return padE(dim(' ' + hint), IW - vlen(ver) - 1) + dim(ver)
+  // 放得下就带版本号;放不下就舍掉版本号,而不是把提示尾部截掉(截掉会看不到 Esc 返回)
+  if (vlen(hint) + vlen(ver) + 2 <= IW) return padE(dim(' ' + hint), IW - vlen(ver) - 1) + dim(ver)
+  return dim(' ' + trunc(hint, IW - 2))
 }
 
 function render() {
@@ -705,9 +717,22 @@ async function actionProbe() {
   }
   const res = await probe(p, secret)
   state.probing = false
+  if (res.ok && res.switched) {
+    // 探活发现另一种鉴权方式才通 —— 直接记住,免得用户自己猜
+    p.auth = res.authUsed
+    saveProviders(state.cfg)
+  }
   state.message = res.ok
-    ? { t: `连通 ${res.ms}ms —— 端点、密钥、模型名都正确  ·  ${p.model}`, lv: 'ok' }
-    : { t: `探活失败${res.status ? ' [HTTP ' + res.status + ']' : ''}:${cut(res.reason, 80)}${res.hint ? '  — ' + res.hint : ''}`, lv: 'fail' }
+    ? {
+        t: res.switched
+          ? `连通 ${res.ms}ms —— 该接口需要 ${res.authUsed === 'x-api-key' ? 'x-api-key 头' : 'Bearer 头'},已自动改好并保存`
+          : `连通 ${res.ms}ms —— 端点、密钥、模型名都正确  ·  ${p.model}`,
+        lv: 'ok',
+      }
+    : {
+        t: `探活失败${res.status ? ' [HTTP ' + res.status + ']' : ''}:${cut(res.reason, 70)}${res.hint ? '  — ' + res.hint : ''}`,
+        lv: 'fail',
+      }
   render()
 }
 
@@ -769,12 +794,13 @@ function actionSelectProvider() {
 
 /** 打开模型选择界面 */
 function openModelPicker(p, found) {
-  const cur = found.list.findIndex((m) => m.id === p.model)
-  state.models = { providerId: p.id, list: found.list, url: found.url, cursor: cur >= 0 ? cur : 0 }
+  const list = found.list || []
+  const idx = list.findIndex((m) => m.id === p.model)
+  state.models = { providerId: p.id, list, url: found.url || '', cursor: idx >= 0 ? idx + 1 : 0 }
   state.screen = 'models'
 }
 
-/** M:获取该供应商的模型列表 */
+/** m:获取该供应商的模型列表。拉不到也把界面打开 —— 里面第一项就是手动输入 */
 async function actionPickModel() {
   const p = state.cfg.providers[state.pCursor]
   if (!p) return
@@ -787,16 +813,57 @@ async function actionPickModel() {
     state.message = null
     openModelPicker(p, found)
   } else {
-    state.message = { t: `获取模型失败:${cut(found.reason, 80)}`, lv: 'fail' }
+    // 不在这里失败:很多自建网关没有列模型接口,手动输入才是主路径
+    openModelPicker(p, { list: [], url: '' })
+    state.message = { t: `该接口没能列出模型(${cut(found.reason, 46)})—— 选第一项手动输入`, lv: 'warn' }
   }
   render()
 }
 
-/** 在模型界面回车:把选中的模型写进配置 */
+/** n / 模型屏第一项:手动输入模型名 */
+async function actionSetModelManual() {
+  const p = state.screen === 'models'
+    ? state.cfg.providers.find((x) => x.id === state.models.providerId)
+    : state.cfg.providers[state.pCursor]
+  if (!p) return
+  try {
+    const m = await prompt(`${p.name} · 模型名:`, {
+      hint: '照客户端里显示的名字原样填(如 GLM-5.3);直接回车 = 取消',
+    })
+    if (!m) { state.message = { t: '已取消', lv: 'warn' }; return }
+    p.model = m
+    // 自建接口通常只服务一个模型;四档全指向它,免得后台任务发出不认识的模型名
+    p.haiku_model = m
+    saveProviders(state.cfg)
+    state.message = { t: `${p.id} 的模型已设为 ${m}`, lv: 'ok' }
+    if (state.screen === 'models') state.screen = 'providers'
+  } catch (e) {
+    state.message = { t: '设置失败:' + (e && e.message ? e.message : e), lv: 'fail' }
+  } finally {
+    render()
+  }
+}
+
+/** x:切换鉴权方式(Bearer ↔ x-api-key)。有些网关只认其中一种 */
+function actionToggleAuth() {
+  const p = state.cfg.providers[state.pCursor]
+  if (!p) return
+  p.auth = p.auth === 'x-api-key' ? 'bearer' : 'x-api-key'
+  saveProviders(state.cfg)
+  state.message = {
+    t: `${p.id} 鉴权改为 ${p.auth === 'x-api-key' ? 'x-api-key 头' : 'Authorization: Bearer'}`,
+    lv: 'ok',
+  }
+  render()
+}
+
+/** 在模型界面回车:第 0 行是手动输入,其余把选中的模型写进配置 */
 function actionSelectModel() {
   const M = state.models
+  if (!M) return
+  if (M.cursor === 0) { actionSetModelManual(); return }
   const p = state.cfg.providers.find((x) => x.id === M.providerId)
-  const m = M.list[M.cursor]
+  const m = M.list[M.cursor - 1]
   if (!p || !m) return
   p.model = m.id
   // 第三方接口通常只服务一个模型;四个档位全指向它最稳,免得后台任务发出不认识的模型名
@@ -816,8 +883,11 @@ async function actionAddProvider() {
   try {
     const name = await prompt('新接口 · 名称(显示用,随便起):')
     if (!name) { state.message = { t: '已取消', lv: 'warn' }; return }
-    const url = await prompt('新接口 · Base URL(需 Anthropic 兼容,如 https://api.xxx.com/anthropic):')
-    if (!url) { state.message = { t: '已取消', lv: 'warn' }; return }
+    const rawUrl = await prompt('新接口 · Base URL:', {
+      hint: '需 Anthropic 兼容。填到 /v1 之前为止 —— Claude Code 会自己接 /v1/messages',
+    })
+    if (!rawUrl) { state.message = { t: '已取消', lv: 'warn' }; return }
+    const norm = normalizeBaseUrl(rawUrl)
     const key = await prompt('新接口 · 密钥:', {
       hidden: true,
       hint: '输入不回显 · 留空 = 先不填,之后可在供应商屏按 k 补录',
@@ -833,7 +903,7 @@ async function actionAddProvider() {
       name,
       custom: true,
       verified: false,
-      base_url: String(url).replace(/\/+$/, ''),
+      base_url: norm.url,
       key_ref: id,
       model: '',
       haiku_model: '',
@@ -850,10 +920,15 @@ async function actionAddProvider() {
     state.pCursor = state.cfg.providers.length - 1
 
     const found = await fetchModels(p, key || null)
-    if (found.ok) openModelPicker(p, found)
-    else {
-      state.screen = 'providers'
-      state.message = { t: `已新增 ${name};但没能列出模型:${cut(found.reason, 60)}`, lv: 'warn' }
+    // 拉不到列表也要把模型界面打开:第一项就是手动输入 ——
+    // 很多自建网关没有列模型接口,手填才是正常路径,不该在这里失败。
+    openModelPicker(p, found.ok ? found : { list: [], url: '' })
+    if (norm.changed) {
+      state.message = { t: `Base URL 已自动修正为 ${norm.url}(去掉多余的 /v1)`, lv: 'warn' }
+    } else if (!found.ok) {
+      state.message = { t: `该接口不提供模型列表(${cut(found.reason, 40)})—— 选第一项手动输入模型名`, lv: 'warn' }
+    } else {
+      state.message = null
     }
   } catch (e) {
     state.message = { t: '新增失败:' + (e && e.message ? e.message : e), lv: 'fail' }
@@ -868,17 +943,22 @@ async function actionEditProvider() {
   if (!p) return
   try {
     const name = await prompt(`新名称(当前 ${p.name}):`, { hint: '直接回车 = 不修改' })
-    const url = await prompt(`新 Base URL(当前 ${p.base_url}):`, { hint: '直接回车 = 不修改' })
+    const url = await prompt(`新 Base URL(当前 ${p.base_url}):`, {
+      hint: '直接回车 = 不修改。填到 /v1 之前为止,Claude Code 会自己接 /v1/messages',
+    })
     const key = await prompt('新密钥:', { hidden: true, hint: '输入不回显 · 直接回车 = 不修改密钥' })
+    let normalized = false
     if (name) p.name = name
-    if (url) p.base_url = String(url).replace(/\/+$/, '')
+    if (url) { const n = normalizeBaseUrl(url); p.base_url = n.url; normalized = n.changed }
     if (key && p.key_ref) {
       const pass = await currentPassphrase()
       if (pass) setSecretEntry(p.key_ref, key, pass)
     }
     if (!name && !url && !key) { state.message = { t: '没有改动', lv: 'warn' }; return }
     saveProviders(state.cfg)
-    state.message = { t: `已更新 ${p.name}`, lv: 'ok' }
+    state.message = normalized
+      ? { t: `已更新 ${p.name};Base URL 已自动修正为 ${p.base_url}`, lv: 'warn' }
+      : { t: `已更新 ${p.name}`, lv: 'ok' }
   } catch (e) {
     state.message = { t: '更新失败:' + (e && e.message ? e.message : e), lv: 'fail' }
   } finally {
@@ -940,16 +1020,20 @@ function handleKey(s) {
     else if (down) state.pCursor = (state.pCursor + 1) % n
     else if (enter) actionSelectProvider()
     else if (s === 'm' || s === 'M') actionPickModel()
+    else if (s === 'n' || s === 'N') actionSetModelManual()
+    else if (s === 'x' || s === 'X') actionToggleAuth()
     else if (s === 'a' || s === 'A') actionAddProvider()
     else if (s === 'e' || s === 'E') actionEditProvider()
     else if (s === 'd' || s === 'D') actionDeleteProvider()
     else if (s === 'k' || s === 'K') { state.screen = 'keys'; state.kCursor = kIndexForProvider(state.pCursor) }
     else if (s === 'q' || s === 'Q' || esc) { state.screen = 'main'; state.message = null }
   } else if (state.screen === 'models') {
-    const n = state.models ? state.models.list.length : 0
-    if (n && up) state.models.cursor = (state.models.cursor + n - 1) % n
-    else if (n && down) state.models.cursor = (state.models.cursor + 1) % n
+    // 第 0 行是"手动输入",所以总行数是 list.length + 1
+    const n = state.models ? state.models.list.length + 1 : 1
+    if (up) state.models.cursor = (state.models.cursor + n - 1) % n
+    else if (down) state.models.cursor = (state.models.cursor + 1) % n
     else if (enter) actionSelectModel()
+    else if (s === 'i' || s === 'I') actionSetModelManual()
     else if (s === 'q' || s === 'Q' || esc) { state.screen = 'providers'; state.message = null }
   } else if (state.screen === 'keys') {
     const rows = state.cfg.providers.filter((p) => p.key_ref)
@@ -1031,9 +1115,13 @@ if (RENDER_ONLY) {
       let sec = null
       if (p.key_ref) { const r = await getSecret(p.key_ref); if (r.ok) sec = r.value }
       const f = await fetchModels(p, sec)
-      state.models = f.ok
-        ? { providerId: p.id, list: f.list, url: f.url, cursor: 0 }
-        : { providerId: p.id, list: [{ id: '(获取失败)', label: f.reason, context: null }], url: p.base_url, cursor: 0 }
+      // 与真实流程保持一致:拉不到就是空列表,界面靠"手动输入"那一行兜底
+      state.models = {
+        providerId: p.id,
+        list: f.ok ? f.list : [],
+        url: f.ok ? f.url : '',
+        cursor: 0,
+      }
     }
     const lines = (() => {
       const IW = W - 4
