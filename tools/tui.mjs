@@ -202,8 +202,52 @@ function ccVersion() {
   catch { return '未安装' }
 }
 function hostOS() {
-  const n = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' }[os.platform()] || os.platform()
-  return `${n} ${os.release()}`
+  return osVersion()
+}
+
+/**
+ * 宿主系统的**产品版本**。
+ *
+ * ⚠ 不能用 os.release():在 macOS 上它是 Darwin **内核**版本(如 25.5.0),
+ * 而 macOS 产品版本是另一回事(如 26.5.1)。曾经把内核版本当成系统版本显示,
+ * 被用户一眼看出来不对。os.version() 给的也是内核字符串,同样不行。
+ */
+let _osVer = null
+function osVersion() {
+  if (_osVer) return _osVer
+  const p = os.platform()
+  if (p === 'darwin') {
+    try {
+      const r = spawnSync('sw_vers', ['-productVersion'], { encoding: 'utf8' })
+      if (r.status === 0 && r.stdout.trim()) return (_osVer = `macOS ${r.stdout.trim()}`)
+    } catch {}
+    _osVer = `macOS(内核 ${os.release()})`
+  } else if (p === 'win32') {
+    _osVer = os.version() || `Windows ${os.release()}`
+  } else if (p === 'linux') {
+    try {
+      const m = /^PRETTY_NAME="?([^"\n]+)"?/m.exec(fs.readFileSync('/etc/os-release', 'utf8'))
+      if (m) return (_osVer = m[1])
+    } catch {}
+    _osVer = `Linux ${os.release()}`
+  } else {
+    _osVer = `${p} ${os.release()}`
+  }
+  return _osVer
+}
+
+/** 当前代码对应的提交(比手写的版本号可靠) */
+let _git = null
+function gitInfo() {
+  if (_git) return _git
+  try {
+    const sha = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: USB, encoding: 'utf8' })
+    if (sha.status === 0 && sha.stdout.trim()) {
+      const d = spawnSync('git', ['log', '-1', '--format=%cd', '--date=short'], { cwd: USB, encoding: 'utf8' })
+      return (_git = { sha: sha.stdout.trim(), date: d.status === 0 ? d.stdout.trim() : '' })
+    }
+  } catch {}
+  return (_git = { sha: '', date: '' })
 }
 function memInfo() {
   const t = os.totalmem() / 1024 ** 3
@@ -523,14 +567,16 @@ function bodyAbout(IW) {
   out.push(`${dim('P O R T A B L E   A S S I S T A N T')}`)
   out.push('')
   out.push(dim('─'.repeat(IW)))
-  out.push(`  ${dim('版本')}    随身 Agent 盘 v0.2`)
-  out.push(`  ${dim('平台')}    ${PLAT || '?'}   ${dim('·  宿主')} ${hostOS()}`)
+  const g = gitInfo()
+  out.push(`  ${dim('版本')}    随身 Agent 盘${g.sha ? `  ${dim('·')}  提交 ${g.sha}${g.date ? `(${g.date})` : ''}` : ''}`)
+  out.push(`  ${dim('平台')}    ${PLAT || '?'}   ${dim('·  宿主')} ${osVersion()}`)
   out.push(`  ${dim('运行时')}  node ${process.version}   ${dim('·')}   claude-code ${ccVersion()}`)
   out.push(`  ${dim('盘根')}    ${cut(USB, IW - 12)}`)
   out.push(`  ${dim('数据')}    ${cut(PHOME, IW - 12)}`)
   out.push('')
-  out.push(`  ${dim('跨平台')}  macOS / Windows / Linux ${dim('(exFAT 无软链,全部普通文件)')}`)
-  out.push(`  ${dim('零依赖')}  面板与启动器只用 Node 内置模块,盘上没有 node_modules`)
+  out.push(`  ${dim('跨平台')}  macOS / Windows / Linux ${dim('·  不使用软链接(exFAT 不支持,所以全用普通文件)')}`)
+  out.push(`  ${dim('零依赖')}  面板与启动器只用 Node 内置模块,不引入任何第三方库`)
+  out.push(`  ${dim('')}        ${dim('(Claude Code 自己的依赖在 app/claude/node_modules,与本项目无关)')}`)
   out.push('')
   out.push(`  ${dim('文档')}    README.md`)
   return out
