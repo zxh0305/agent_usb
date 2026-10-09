@@ -18,7 +18,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
-import { loadProviders, authHeaders, DATA, C } from './launch.mjs'
+import { loadProviders, authHeaders, DATA, C, listSkills, readSkill } from './launch.mjs'
 import { getSecret } from './secrets.mjs'
 
 const DEFAULT_SYSTEM = '你是一个简洁、直接的中文助手。回答不要客套,不要复述我的问题。'
@@ -63,7 +63,7 @@ async function main() {
 
   console.log()
   console.log(`  ${C.b('对话助手')}   ${prov.name} · ${C.b(prov.model)}`)
-  console.log(`  ${C.dim('只对话,不操作文件。命令:/clear 清空 · /save 导出 · /exit 退出')}`)
+  console.log(`  ${C.dim('只对话,不操作文件。命令:/clear 清空 · /skill 技能 · /save 导出 · /exit 退出')}`)
   console.log(`  ${C.dim('记录:' + path.relative(process.cwd(), logFile))}`)
   console.log()
 
@@ -145,6 +145,23 @@ async function main() {
     }
     if (text === '/save') {
       console.log(`  ${C.dim('已记录在 ' + logFile)}\n`)
+      reask(); continue
+    }
+    // 全局 skill:和 Claude Code 共用同一份 data/skills/,这里按需载入
+    if (text === '/skill' || text === '/skills') {
+      const names = listSkills()
+      console.log(`  ${C.dim(names.length ? '可用技能:' + names.join(' · ') + '(用 /skill <名字> 载入)' : '还没有技能;放进 data/skills/<名字>/SKILL.md 即可')}\n`)
+      reask(); continue
+    }
+    if (text.startsWith('/skill ')) {
+      const n = text.slice(7).trim()
+      const s = readSkill(n)
+      if (!s) {
+        console.log(`  ${C.r('✗')} 没有技能「${n}」${listSkills().length ? ';可用:' + listSkills().join(' · ') : ''}\n`)
+        reask(); continue
+      }
+      messages.push({ role: 'user', content: `[技能指令] 接下来请按这个技能执行:\n\n${s.body}` })
+      console.log(`  ${C.g('✓')} 已载入技能 ${C.b(n)}${s.meta.description ? '  ' + C.dim(s.meta.description) : ''}\n`)
       reask(); continue
     }
 

@@ -21,6 +21,7 @@ import {
   authHeaders, normalizeBaseUrl,
   resolveWorkdir, readDaemon, writeDaemon, expandHome,
   loadAgents, saveAgents, prepareAgent, purgeStaleAichatConfig, appName,
+  syncSkills, applyMcp, listSkills,
 } from './launch.mjs'
 import {
   getSecret, setSecretEntry, removeSecretEntry, listSecretNames, hasPassfile,
@@ -1300,6 +1301,9 @@ export async function runTUI(opts = {}) {
   state.workdir = opts.workdir || resolveWorkdir()
   state.agents = loadAgents()
   state.appName = appName()
+  // 全局 skill / MCP 每次启动都对齐到各 agent(exFAT 不能软链,所以是复制)
+  syncSkills()
+  applyMcp()
   // 上次若被强杀,aichat 那个含密钥的临时配置会残留 —— 启动时清掉
   if (purgeStaleAichatConfig()) {
     state.message = { t: '已清理上次遗留的 aichat 临时配置(其中含密钥)', lv: 'warn' }

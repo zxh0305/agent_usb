@@ -1,0 +1,11 @@
+{
+  "$comment": "全局 MCP 注册表:这里是唯一维护处,各 agent 启动时按自己的格式生成配置。路径用占位符,换电脑/换盘符都不用改。",
+  "servers": {
+    "usb-local": {
+      "description": "盘本地工具:查供应商余额、列供应商、看盘状态(这些 Claude Code 自己读不到)",
+      "command": "${NODE}",
+      "args": ["${TOOLS}/mcp-local.mjs"],
+      "agents": ["claude"]
+    }
+  }
+}

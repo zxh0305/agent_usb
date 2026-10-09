@@ -164,6 +164,109 @@ export function resolveWorkdir({ cli = null, here = false } = {}) {
   return { dir: fallback, src: '盘内默认' }
 }
 
+// ────────────────────── 全局 skill / MCP(各 agent 共用)──────────────────────
+// 设计原则:**唯一维护处 + 各 agent 适配器**。
+// 用户之后可能装别的 agent,所以 skill 和 MCP 不能绑死在 Claude Code 上。
+// 又因为 exFAT 不能建软链,同步方式是**复制**(技能都是小文本,开销可忽略)。
+const SKILLS_DIR = path.join(DATA, 'skills')
+const MCP_FILE = path.join(DATA, 'mcp', 'servers.json')
+
+/** 拆出 SKILL.md 的 frontmatter(name/description/…)与正文 */
+function parseSkill(text) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text)
+  if (!m) return { meta: {}, body: text }
+  const meta = {}
+  for (const line of m[1].split('\n')) {
+    const i = line.indexOf(':')
+    if (i > 0) meta[line.slice(0, i).trim()] = line.slice(i + 1).trim()
+  }
+  return { meta, body: text.slice(m[0].length) }
+}
+
+/** 列出全局 skill 的名字 */
+export function listSkills() {
+  try {
+    return fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && fs.existsSync(path.join(SKILLS_DIR, e.name, 'SKILL.md')))
+      .map((e) => e.name)
+  } catch { return [] }
+}
+
+/** 读一个 skill(给 chat 之类自己实现的 agent 用) */
+export function readSkill(name) {
+  try {
+    const t = fs.readFileSync(path.join(SKILLS_DIR, name, 'SKILL.md'), 'utf8')
+    return parseSkill(t)
+  } catch { return null }
+}
+
+/**
+ * 把 data/skills/ 适配给各 agent:
+ *   Claude Code —— 原样复制到 <CLAUDE_CONFIG_DIR>/skills/
+ *   aichat      —— 转成 role(aichat 的 role 就是一段提示词模板)
+ */
+export function syncSkills() {
+  const names = listSkills()
+  if (!names.length) return 0
+
+  // Claude Code
+  try {
+    const dst = path.join(PHOME, '.claude', 'skills')
+    fs.mkdirSync(dst, { recursive: true })
+    for (const n of names) {
+      fs.mkdirSync(path.join(dst, n), { recursive: true })
+      fs.copyFileSync(path.join(SKILLS_DIR, n, 'SKILL.md'), path.join(dst, n, 'SKILL.md'))
+    }
+  } catch { /* 同步失败不该拦住启动 */ }
+
+  // aichat:skill → role(去掉它不认识的 frontmatter,只留正文当提示词)
+  try {
+    const dst = path.join(aichatConfigDir(), 'roles')
+    fs.mkdirSync(dst, { recursive: true })
+    for (const n of names) {
+      const { body } = readSkill(n)
+      if (body) fs.writeFileSync(path.join(dst, `${n}.md`), body.trim() + '\n')
+    }
+  } catch {}
+
+  return names.length
+}
+
+/**
+ * 把 data/mcp/servers.json 适配给各 agent。
+ * 目前只有 Claude Code 支持 MCP(aichat 不支持,它用 roles/rag)。
+ * 注册表里每条可以用 agents 字段限定给谁;路径用占位符,换盘符也不用改。
+ */
+export function applyMcp() {
+  let reg = {}
+  try { reg = JSON.parse(fs.readFileSync(MCP_FILE, 'utf8')).servers || {} } catch { return 0 }
+  const expand = (s) => String(s)
+    .replace(/\$\{NODE\}/g, process.execPath)
+    .replace(/\$\{TOOLS\}/g, HERE)
+    .replace(/\$\{USB\}/g, USB)
+    .replace(/\$\{HOME\}/g, PHOME)
+
+  const forClaude = {}
+  for (const [name, s] of Object.entries(reg)) {
+    if (Array.isArray(s.agents) && !s.agents.includes('claude')) continue
+    if (!s.command) continue
+    forClaude[name] = {
+      command: expand(s.command),
+      args: (s.args || []).map(expand),
+      ...(s.env ? { env: Object.fromEntries(Object.entries(s.env).map(([k, v]) => [k, expand(v)])) } : {}),
+    }
+  }
+
+  // 合并写:Claude Code 自己也往这个文件里写东西,不能整份覆盖
+  const file = path.join(PHOME, '.claude.json')
+  let j = {}
+  try { j = JSON.parse(fs.readFileSync(file, 'utf8')) } catch {}
+  if (j.hasCompletedOnboarding !== true) j.hasCompletedOnboarding = true
+  j.mcpServers = { ...(j.mcpServers || {}), ...forClaude }
+  fs.writeFileSync(file, JSON.stringify(j, null, 2) + '\n')
+  return Object.keys(forClaude).length
+}
+
 /**
  * 首次运行时补齐 Claude Code 需要的配置文件。
  * 目的是让"从 git 克隆出来的干净副本"(不含 data/home)也能直接跑起来 ——
@@ -173,23 +276,24 @@ export function ensureClaudeConfig() {
   const dir = path.join(PHOME, '.claude')
   fs.mkdirSync(dir, { recursive: true })
 
-  const settings = path.join(dir, 'settings.json')
-  if (!fs.existsSync(settings)) {
-    fs.writeFileSync(settings, JSON.stringify({
-      $schema: 'https://json.schemastore.org/claude-code-settings.json',
-      env: {
-        CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
-        CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1',
-      },
-    }, null, 2) + '\n')
+  // settings.json:行为开关 + 中文状态栏。
+  // 必须**合并写**:Claude Code 自己会往这个文件里加键(例如 theme),
+  // 每次启动整个覆盖会把它的设置冲掉。
+  const settingsFile = path.join(dir, 'settings.json')
+  let s = {}
+  try { s = JSON.parse(fs.readFileSync(settingsFile, 'utf8')) } catch {}
+  s.env = {
+    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+    CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1',
+    ...(s.env || {}),          // 已有值优先,别冲掉用户/其他工具写的
   }
-
-  // 跳过首次引导向导。注意它不解决鉴权:真正免登录靠启动器在
-  // 首次运行前就把 ANTHROPIC_AUTH_TOKEN 注入进去。
-  const stateFile = path.join(PHOME, '.claude.json')
-  if (!fs.existsSync(stateFile)) {
-    fs.writeFileSync(stateFile, JSON.stringify({ hasCompletedOnboarding: true }, null, 2) + '\n')
+  // 界面文字(Thought for / Brewed for …)是英文,Claude Code 没有语言开关;
+  // 但状态栏可以由我们自己给,所以这里把它做成中文并显示有用的信息。
+  s.statusLine = {
+    type: 'command',
+    command: `"${process.execPath}" "${path.join(HERE, 'statusline.mjs')}"`,
   }
+  fs.writeFileSync(settingsFile, JSON.stringify(s, null, 2) + '\n')
 }
 
 /**
@@ -541,6 +645,8 @@ function header(row) {
 async function main() {
   ensureClaudeConfig()          // 干净副本首次运行也能直接跑
   ensureProvidersConfig()
+  syncSkills()                  // 全局 skill → 各 agent 的格式
+  applyMcp()                    // 全局 MCP 注册表 → 各 agent 的配置
   purgeStaleAichatConfig()      // 上次被强杀留下的含密钥配置
   const argv = process.argv.slice(2)
   // 分离透传给 claude 的参数
