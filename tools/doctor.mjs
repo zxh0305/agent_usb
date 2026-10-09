@@ -13,10 +13,13 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { getSecret } from './secrets.mjs'
-import { probe } from './launch.mjs'
+import { probe, ensureProvidersConfig } from './launch.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const USB = path.resolve(HERE, '..')
+
+// 干净克隆的第一次运行也要能体检:先把配置从模板补齐
+ensureProvidersConfig()
 const DATA = path.join(USB, 'data')
 const PHOME = path.join(DATA, 'home')
 

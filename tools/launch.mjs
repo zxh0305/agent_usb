@@ -179,6 +179,9 @@ export function buildEnv(provider, secret) {
 
 // ────────────────────────── 工具 ──────────────────────────
 export function loadProviders() {
+  // 放在这里而不是 main():tui.mjs / doctor.mjs 也会直接调它,
+  // 干净克隆的第一次调用同样需要从模板生成配置。
+  ensureProvidersConfig()
   if (!fs.existsSync(PROVIDERS_FILE)) die(`找不到供应商清单:${PROVIDERS_FILE}`)
   try { return JSON.parse(fs.readFileSync(PROVIDERS_FILE, 'utf8')) }
   catch (e) { die(`供应商清单解析失败:\n${e.message}`) }
