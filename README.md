@@ -113,7 +113,24 @@ sh tools/claude.sh -- -p "用一句话解释什么是闭包"
 |---|---|---|
 | `claude` | 盘内的 Claude Code | 带文件/命令工具,能真正操作项目 |
 | `chat` | **内置轻量对话助手** | 只对话不带工具,问得快、开销小,适合问答/文案/翻译 |
+| `aichat` | **第三方 [aichat](https://github.com/sigoden/aichat) v0.30.0** | 单文件约 9MB。能力比内置对话多:角色(roles)、会话(sessions)、**RAG 知识库**、宏、还能 `--serve` 起个 Web 界面 |
 | `cmd` | **任意命令** | 你想接什么就接什么,带着盘上的环境变量执行 |
+
+### 关于 aichat 的密钥(和别的 agent 不一样)
+
+Claude Code 和内置对话助手的密钥都是**从环境变量读**,盘上不留明文。
+但 aichat **不支持在配置里引用环境变量**(实测 `${VAR}` 不生效),密钥只能写进
+它的配置文件。所以面板的处理是:**启动前从密钥库生成、退出后立刻删除** ——
+明文只在 aichat 运行期间存在。它的会话/角色/RAG 数据存在同级文件里,会正常保留。
+
+另外 aichat 的 `api_base` 约定和 Claude Code **相反**(和某些客户端一样):
+
+| | 约定 | 所以配给它的 base |
+|---|---|---|
+| Claude Code | `base` + `/v1/messages` | `…/code` |
+| aichat | `base` + `/messages` | `…/code/v1` |
+
+这个换算面板已经自动做了,你不用管。
 
 **添加一个 agent**:面板主菜单按 `a`,依次填「名称 / 一句话说明 / 命令」即可。
 比如你装好了 aichat、codex、或者自己写的 Python agent,把启动命令填进去就行:

@@ -20,7 +20,7 @@ import {
   claudeBinary, buildEnv, probe, loadProviders, freeSpace, C,
   authHeaders, normalizeBaseUrl,
   resolveWorkdir, readDaemon, writeDaemon, expandHome,
-  loadAgents, saveAgents, agentCommand,
+  loadAgents, saveAgents, prepareAgent, purgeStaleAichatConfig,
 } from './launch.mjs'
 import {
   getSecret, setSecretEntry, removeSecretEntry, listSecretNames, hasPassfile,
@@ -768,7 +768,7 @@ async function actionLaunchAgent(agent) {
     if (!r.ok) { state.message = { t: `取不到密钥:${r.reason} —— 进「密钥管理」录入`, lv: 'fail' }; return }
     secret = r.value
   }
-  const spec = agentCommand(agent, { providerId: p.id })
+  const spec = prepareAgent(agent, { provider: p, secret })
   if (!spec.bin) {
     state.message = { t: `agent「${agent.name}」没有可用的启动命令(检查它的 command 字段)`, lv: 'fail' }
     return
@@ -785,6 +785,7 @@ async function actionLaunchAgent(agent) {
     child.on('exit', (code) => res(code ?? 0))
     child.on('error', (e) => { spawnErr = e; res(-1) })
   })
+  try { if (spec.cleanup) spec.cleanup() } catch {}   // 收尾:删掉含密钥的临时配置
   enterScreen()
   state.message = spawnErr
     ? { t: `启动失败:${spawnErr.message}`, lv: 'fail' }
@@ -1292,6 +1293,10 @@ export async function runTUI(opts = {}) {
   state.cfg = loadProviders()
   state.workdir = opts.workdir || resolveWorkdir()
   state.agents = loadAgents()
+  // 上次若被强杀,aichat 那个含密钥的临时配置会残留 —— 启动时清掉
+  if (purgeStaleAichatConfig()) {
+    state.message = { t: '已清理上次遗留的 aichat 临时配置(其中含密钥)', lv: 'warn' }
+  }
   // 兼容旧写法:确保 current 有效
   if (!state.cfg.providers.some((p) => p.id === state.cfg.current)) {
     state.cfg.current = state.cfg.providers[0].id

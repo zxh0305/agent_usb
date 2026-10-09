@@ -126,6 +126,42 @@ done
 # 我们直接调用平台包里的二进制,本来就不需要 .bin。
 rm -rf node_modules/.bin
 
+# ─────────────── 2b. 第三方 agent:aichat(单文件,约 9MB)───────────────
+AICHAT_VER=${AICHAT_VER:-0.30.0}
+aichat_asset() {
+  case "$1" in
+    darwin-arm64) echo "aarch64-apple-darwin tar.gz" ;;
+    darwin-x64)   echo "x86_64-apple-darwin tar.gz" ;;
+    win32-x64)    echo "x86_64-pc-windows-msvc zip" ;;
+    linux-x64)    echo "x86_64-unknown-linux-musl tar.gz" ;;
+    linux-arm64)  echo "aarch64-unknown-linux-musl tar.gz" ;;
+    *) return 1 ;;
+  esac
+}
+for P in $PLATS; do
+  say "aichat · $P"
+  SPEC=$(aichat_asset "$P") || { bad "aichat 没有 $P 的发行版,跳过"; continue; }
+  set -- $SPEC; DIST=$1; EXT=$2
+  MARK="$USB/app/aichat/$P/.version"
+  DEST="$USB/app/aichat/$P"
+  if [ -f "$MARK" ] && [ "$(cat "$MARK")" = "$AICHAT_VER" ] && [ -x "$DEST/aichat" ]; then
+    ok "$P 已是 $AICHAT_VER,跳过"; continue
+  fi
+  if [ "$EXT" = "zip" ]; then ARCH="aichat-v$AICHAT_VER-$DIST.zip"; else ARCH="aichat-v$AICHAT_VER-$DIST.tar.gz"; fi
+  URL="https://github.com/sigoden/aichat/releases/download/v$AICHAT_VER/$ARCH"
+  echo "   下载 $URL"
+  curl -fsSL --max-time 600 -o "$WORK/$ARCH" "$URL" || { bad "下载失败(网络?)"; continue; }
+  rm -rf "$WORK/ai"; mkdir -p "$WORK/ai" "$DEST"
+  if [ "$EXT" = "zip" ]; then unzip -q -o "$WORK/$ARCH" -d "$WORK/ai"; else tar -xzf "$WORK/$ARCH" -C "$WORK/ai"; fi
+  SRC=$(find "$WORK/ai" -type f -name 'aichat*' ! -name '*.tar.gz' ! -name '*.zip' | head -1)
+  [ -n "$SRC" ] || { bad "归档里没找到 aichat"; continue; }
+  NAME=aichat; [ "$P" = "win32-x64" ] && NAME=aichat.exe
+  cp "$SRC" "$DEST/$NAME"
+  printf '%s\n' "$AICHAT_VER" > "$MARK"
+  ok "$P → app/aichat/$P/$NAME ($(du -h "$DEST/$NAME" | cut -f1))"
+done
+rm -rf "$WORK/ai"
+
 # ─────────────── 3. 拷入 U 盘 ───────────────
 say "拷入 U 盘"
 APP="$USB/app/claude"

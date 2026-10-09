@@ -71,6 +71,7 @@ export function loadAgents() {
   const builtin = [
     { id: 'claude', name: 'Claude Code', desc: '编码 · 操作文件 · 批量', kind: 'claude', builtin: true },
     { id: 'chat', name: '对话助手', desc: '快速问答 · 文案 · 翻译', kind: 'chat', builtin: true },
+    { id: 'aichat', name: 'aichat', desc: '对话 · 角色 · RAG 知识库', kind: 'aichat', builtin: true },
   ]
   let list = []
   try {
@@ -242,25 +243,113 @@ export function normalizeBaseUrl(raw) {
   return { url, changed: url !== before }
 }
 
+export function aichatBinary() {
+  if (!PLAT) return null
+  const p = path.join(USB, 'app', 'aichat', PLAT, IS_WIN ? 'aichat.exe' : 'aichat')
+  return fs.existsSync(p) ? p : null
+}
+
+/** aichat 按系统规范定位配置目录;因为 HOME 已被重定向到盘上,它就落在盘里 */
+function aichatConfigDir() {
+  if (IS_WIN) return path.join(PHOME, 'AppData', 'Roaming', 'aichat')
+  if (OS === 'linux') return path.join(PHOME, '.config', 'aichat')
+  return path.join(PHOME, 'Library', 'Application Support', 'aichat')
+}
+
+const AICHAT_MARKER = '由随身 Agent 盘在启动 aichat 时自动生成'
+
 /**
- * 把一个 agent 定义翻译成"怎么启动"。
- * 三种 kind:
+ * 兜底清理:aichat 的临时配置里含明文密钥。
+ * 正常退出时我们会删掉它,但如果进程被强杀(或面板被 kill),它就会残留 ——
+ * 所以每次启动都检查一次,发现是自己生成的残留就删掉。
+ */
+export function purgeStaleAichatConfig() {
+  try {
+    const f = path.join(aichatConfigDir(), 'config.yaml')
+    if (!fs.existsSync(f)) return false
+    if (fs.readFileSync(f, 'utf8').slice(0, 200).includes(AICHAT_MARKER)) {
+      fs.rmSync(f, { force: true })
+      return true
+    }
+  } catch { /* 清不掉也不该影响启动 */ }
+  return false
+}
+
+/**
+ * 生成 aichat 的配置。
+ *
+ * 踩过的两个坑:
+ *  1. aichat 的 api_base 约定是 **base + `/messages`**(和 ZCode 一样),
+ *     而 Claude Code 是 base + `/v1/messages` —— 所以要给它 `base_url + '/v1'`。
+ *  2. 它**不支持 `${环境变量}` 插值**,密钥只能写进配置文件。
+ *     所以这里在启动前生成、退出后删除(aichat 的会话/角色/RAG 存在同级文件里,会保留),
+ *     让明文密钥只存在于运行期间,而不是长期躺在盘上。
+ */
+function writeAichatConfig(provider, secret) {
+  try {
+    const dir = aichatConfigDir()
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, 'config.yaml')
+    let base = String(provider.base_url || '').replace(/\/+$/, '')
+    if (!/\/v1$/.test(base)) base += '/v1'
+    const yaml = [
+      `# ${AICHAT_MARKER},退出后会删除(其中含密钥)。`,
+      'clients:',
+      '  - type: claude',
+      `    api_base: ${base}`,
+      `    api_key: ${secret || ''}`,
+      '    models:',
+      `      - name: ${provider.model}`,
+      '        max_input_tokens: 200000',
+      '        max_output_tokens: 8192',
+      `model: claude:${provider.model}`,
+      '',
+    ].join('\n')
+    // 备份用户原有的配置,退出后还原(他可能在里面写了 roles 等)
+    const prev = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null
+    fs.writeFileSync(file, yaml, { mode: 0o600 })
+    return {
+      file,
+      cleanup: () => {
+        try {
+          if (prev !== null) fs.writeFileSync(file, prev, { mode: 0o600 })
+          else fs.rmSync(file, { force: true })
+        } catch { /* 删不掉也不该影响主流程 */ }
+      },
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 把一个 agent 定义翻译成"怎么启动",并做完它需要的准备工作。
+ * 返回 { bin, args, cleanup }:启动后请务必调用 cleanup()。
+ *
+ * kind:
  *   claude —— 盘内的 Claude Code 原生二进制(带工具,能操作文件)
  *   chat   —— 内置轻量对话助手(不带工具)
- *   cmd    —— 任意命令,交给系统 shell 执行(用户想接什么就接什么)
+ *   aichat —— 第三方 aichat(轻量对话 / 角色 / RAG 知识库)
+ *   cmd    —— 任意命令,交给系统 shell
  */
-export function agentCommand(agent, { providerId = null } = {}) {
+export function prepareAgent(agent, { provider = null, secret = null } = {}) {
   const kind = agent.kind || 'cmd'
-  if (kind === 'claude') return { bin: claudeBinary(), args: [] }
+  if (kind === 'claude') return { bin: claudeBinary(), args: [], cleanup: null }
   if (kind === 'chat') {
     const args = [path.join(HERE, 'chat.mjs')]
-    if (providerId) args.push('--provider', providerId)
-    return { bin: process.execPath, args }
+    if (provider) args.push('--provider', provider.id)
+    return { bin: process.execPath, args, cleanup: null }
+  }
+  if (kind === 'aichat') {
+    const bin = aichatBinary()
+    if (!bin || !provider || !provider.model) return { bin: null, args: [], cleanup: null }
+    const cfg = writeAichatConfig(provider, secret)
+    return { bin, args: [], cleanup: cfg ? cfg.cleanup : null }
   }
   const cmd = agent.command
-  if (!cmd) return { bin: null, args: [] }
-  if (IS_WIN) return { bin: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', cmd] }
-  return { bin: '/bin/sh', args: ['-c', cmd] }
+  if (!cmd) return { bin: null, args: [], cleanup: null }
+  if (IS_WIN) return { bin: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', cmd], cleanup: null }
+  return { bin: '/bin/sh', args: ['-c', cmd], cleanup: null }
 }
 
 export function buildEnv(provider, secret) {
@@ -425,6 +514,7 @@ function header(row) {
 async function main() {
   ensureClaudeConfig()          // 干净副本首次运行也能直接跑
   ensureProvidersConfig()
+  purgeStaleAichatConfig()      // 上次被强杀留下的含密钥配置
   const argv = process.argv.slice(2)
   // 分离透传给 claude 的参数
   const sep = argv.indexOf('--')
@@ -512,7 +602,7 @@ async function main() {
   const ai = own.findIndex((a) => a === '--agent')
   const agentId = ai >= 0 ? own[ai + 1] : null
   const agent = (agentId && agents.find((a) => a.id === agentId)) || agents[0]
-  const spec = agentCommand(agent, { providerId: provider.id })
+  const spec = prepareAgent(agent, { provider, secret })
   if (!spec.bin) {
     die(`agent「${agent.name}」没有可用的启动命令` +
         (agent.kind === 'cmd' ? '\n  它的 command 字段是空的,去 data/config/agents.json 补上' : ''))
@@ -530,15 +620,17 @@ async function main() {
   try { fs.mkdirSync(workdir.dir, { recursive: true }) } catch {}
 
   const env = buildEnv(provider, secret)
-  // 只有 claude / chat 接受透传参数;cmd 是整条命令,再塞参数会变成 $0 之类
-  const extra = agent.kind === 'claude' || agent.kind === 'chat' ? rest : []
+  // cmd 是整条命令,再塞参数会变成 $0 之类;其余三种都接受透传参数
+  const extra = agent.kind === 'cmd' ? [] : rest
   const child = spawn(spec.bin, [...spec.args, ...extra], {
     cwd: workdir.dir,
     env,
     stdio: 'inherit',
   })
-  child.on('exit', (code) => process.exit(code ?? 0))
-  child.on('error', (e) => die(`启动失败:${e.message}`))
+  // 收尾一定要做:比如 aichat 的临时配置里含密钥,必须删掉
+  const finish = (code) => { try { if (spec.cleanup) spec.cleanup() } catch {} ; process.exit(code ?? 0) }
+  child.on('exit', finish)
+  child.on('error', (e) => { try { if (spec.cleanup) spec.cleanup() } catch {} ; die(`启动失败:${e.message}`) })
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) main()

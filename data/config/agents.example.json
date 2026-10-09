@@ -1,5 +1,5 @@
 {
-  "$comment": "Agent 注册表。kind 三种:claude=盘内 Claude Code / chat=内置轻量对话 / cmd=任意命令。自定义的写进 agents.json(不入库)。",
+  "$comment": "Agent 注册表。kind:claude=盘内 Claude Code / chat=内置轻量对话 / aichat=第三方 aichat / cmd=任意命令。自定义的写进 agents.json(不入库)。",
   "agents": [
     {
       "id": "claude",
@@ -13,6 +13,13 @@
       "name": "对话助手",
       "desc": "快速问答 · 文案 · 翻译",
       "kind": "chat",
+      "builtin": true
+    },
+    {
+      "id": "aichat",
+      "name": "aichat",
+      "desc": "对话 · 角色 · RAG 知识库",
+      "kind": "aichat",
       "builtin": true
     }
   ]
