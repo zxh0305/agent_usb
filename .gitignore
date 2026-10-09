@@ -29,3 +29,6 @@ tmp/
 # 用户自己的供应商配置(会累积自建项,可能含内网地址),不入库;
 # 仓库只带 providers.example.json 作为模板,首次运行自动复制。
 data/config/providers.json
+
+# 用户的 agent 注册表(可能含自己的私有命令),不入库;仓库只带 example
+data/config/agents.json

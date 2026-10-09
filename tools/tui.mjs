@@ -20,6 +20,7 @@ import {
   claudeBinary, buildEnv, probe, loadProviders, freeSpace, C,
   authHeaders, normalizeBaseUrl,
   resolveWorkdir, readDaemon, writeDaemon, expandHome,
+  loadAgents, saveAgents, agentCommand,
 } from './launch.mjs'
 import {
   getSecret, setSecretEntry, removeSecretEntry, listSecretNames, hasPassfile,
@@ -47,6 +48,7 @@ const state = {
   probing: false,
   models: null,           // 模型选择界面:{ providerId, list, url, cursor }
   workdir: null,          // { dir, src } 这次会话在哪工作
+  agents: null,           // agent 注册表(loadAgents 读出)
   inputLock: false,       // 正在用 readline 提问时,忽略自己的按键处理
   active: false,
   cfg: null,
@@ -383,81 +385,99 @@ async function ensureBalance(force = false) {
 function innerWidth(W) { return W - 4 }
 
 /** 主屏:返回恰好 IH 行。空间不够时逐级降级 logo,但绝不丢菜单项 */
-function bodyMain(IW, IH) {
+/** 当前供应商的余额(纯文本,拿不到就是空 —— 菜单里不显示"查询中"这种噪音) */
+function balancePlain(p) {
+  if (!p || !p.balance) return ''
+  const c = balCache.get(p.id)
+  return c && c.ok ? c.text : ''
+}
+
+/**
+ * 主菜单的**单一数据来源**。
+ * 分成两组:上面是 agent(干什么活),下面是配置(怎么配)。
+ * bodyMain / doMain / handleKey 都从它取,避免三处各写一份不一致。
+ */
+function mainItems() {
   const p = currentProvider()
   const keys = keyNames()
-  const hasKey = p.key_ref ? keys.includes(p.key_ref) : true
-  const bin = claudeBinary()
-  const ctx = p.context_tokens >= 1e6
-    ? `${(p.context_tokens / 1e6).toFixed(0)}M`
-    : `${Math.round(p.context_tokens / 1000)}K`
-
-  const info = [
-    `${dim('RUNTIME')}   node ${bold(process.version)}  ${dim('·')}  claude-code ${bold(ccVersion())}${bin ? '' : red('  ✗ 本平台未装')}`,
-    `${dim('MODEL')}     ${bold(p.model || '(未选模型)')}  ${dim('via')} ${cut(p.name, 30)}`,
-    `${dim('BALANCE')}   ${balanceText(p)}`,
-    `${dim('WORKDIR')}   ${cut(shortenHome(state.workdir?.dir || ''), Math.max(20, IW - 20))}  ${dim('按 7 修改')}`,
-    `${dim('CAPACITY')}  ${dim('小模型')} ${p.haiku_model || p.model}  ${dim('·')} ${dim('上下文')} ${ctx}  ${dim('·')} ${dim('密钥')} ${p.key_ref ? (hasKey ? green('● 就绪') : red('✗ 未录入')) : dim('不需')}`,
+  return [
+    ...(state.agents || []).map((a) => ({
+      id: 'agent:' + a.id, name: a.name, right: a.desc || '', agent: a,
+    })),
+    { id: 'providers', name: '供应商与模型', right: `${cut(p.name, 20)} · ${p.model || '(未选模型)'}` },
+    { id: 'workdir', name: '工作目录', right: shortenHome(state.workdir?.dir || '') },
+    { id: 'keys', name: '密钥管理', right: `${keys.length} 个已录入` },
+    { id: 'doctor', name: '体检与修复', right: '运行时 · 二进制 · 网络 · 密钥' },
+    { id: 'about', name: '关于 / 版本', right: '' },
   ]
+}
 
-  const menu = [
-    ['启动 Claude Code', p.model],
-    ['切换供应商 / 模型', `${state.cfg.providers.length} 个`],
-    ['测试连通性', '真实探活'],
-    ['密钥管理', `${keys.length} 个密钥`],
-    ['体检与修复', '10 项检查'],
-    ['关于 / 版本', ''],
-    ['工作目录', state.workdir?.src || ''],
-  ]
+/**
+ * 主屏。分区 + 固定列宽对齐。
+ * 之前是 7 项平铺 + 5 行密集状态,没有分组、每个菜单项的值都甩到最右边,
+ * 看着很散。现在:上面 logo 与状态并排,下面按 AGENT / 配置 分组,
+ * 每行「序号 → 名称 → 说明」对齐成固定列。
+ */
+function bodyMain(IW, IH) {
+  const p = currentProvider()
+  const items = mainItems()
+  const agentCount = (state.agents || []).length
+  const numW = 4
+  const nameW = 18
 
-  // 分隔线 + 页脚 + 菜单是硬需求,先扣掉,剩下的才给 logo 和系统信息
-  const bottom = 1 + 1 + menu.length
-  const hb = IH - info.length - bottom
+  const rowOf = (i, it) => {
+    const on = i === state.cursor
+    const num = `[${i + 1}]`
+    const left = `${on ? sel('▸') : ' '} ${on ? sel(padE(num, numW)) : dim(padE(num, numW))} ` +
+      `${on ? sel(padE(cut(it.name, nameW), nameW)) : padE(cut(it.name, nameW), nameW)}`
+    if (!it.right) return cut(left, IW)
+    const room = IW - vlen(left) - 2
+    return room > 6 ? `${left}  ${dim(cut(it.right, room))}` : cut(left, IW)
+  }
+  const section = (label) => {
+    const t = `── ${label} `
+    return dim(t + '─'.repeat(Math.max(0, IW - vlen(t))))
+  }
+
+  const menuRows = []
+  items.forEach((it, i) => {
+    if (i === 0) menuRows.push(section('AGENT'))
+    if (i === agentCount) menuRows.push(section('配置'))
+    menuRows.push(rowOf(i, it))
+  })
+
+  // 右侧状态栏:和 logo 并排
+  const status = [
+    ['宿主', osVersion()],
+    ['平台', PLAT || '?'],
+    ['内存', memInfo()],
+    ['盘剩余', freeSpace()],
+    ['余额', balancePlain(p) || '—'],
+    ['运行时', `node ${process.version}`],
+  ].map(([k, v]) => `${dim(padE(k, 8))} ${v}`)
 
   const big = bigText('CLAUDE')
   const bigW = Math.max(...big.map(vlen))
-  const sys = [
-    dim('S Y S T E M'),
-    `  OS    ${cut(hostOS(), 18)}`,
-    `  ARCH  ${PLAT || '?'}`,
-    `  CPU   ${os.cpus().length} 核`,
-    `  RAM   ${memInfo()}`,
-    `  DISK  ${freeSpace()} 空闲`,
-  ]
-
+  const hb = IH - menuRows.length - 3          // 空行 + 分隔线 + 页脚
   let header = []
-  if (hb >= 11 && bigW + 28 <= IW) {
-    const R = [...sys, ...CUBE.map((l) => dim(l))]
-    const rows = Math.min(Math.max(big.length, R.length), hb)
-    for (let i = 0; i < rows; i++) header.push(padE(big[i] ? cyan(big[i]) : '', bigW + 3) + (R[i] || ''))
-  } else if (hb >= 6) {
-    const L = [bold(cyan('C L A U D E')), '', dim('P O R T A B L E   A S S I S T A N T')]
-    const rows = Math.min(Math.max(L.length, sys.length), hb)
-    for (let i = 0; i < rows; i++) header.push(padE(L[i] || '', 26) + (sys[i] || ''))
-  } else if (hb >= 1) {
-    header = [bold(cyan('C L A U D E')) + '  ' + dim('P O R T A B L E   A S S I S T A N T')]
+  if (hb >= 6 && bigW + 30 <= IW) {
+    const rows = Math.min(Math.max(big.length, status.length), hb)
+    for (let i = 0; i < rows; i++) header.push(padE(big[i] ? cyan(big[i]) : '', bigW + 3) + (status[i] || ''))
+  } else if (hb >= 2) {
+    header = [`${bold(cyan('C L A U D E'))}  ${dim('随身 Agent 盘')}   ${status[0] || ''}`]
   }
 
-  const menuRows = menu.map(([name, hint], i) => {
-    const on = i === state.cursor
-    const num = `[${i + 1}]`
-    const left = `${on ? sel('▸') : ' '} ${on ? sel(num) : dim(num)} ${on ? sel(name) : name}`
-    if (!hint) return cut(left, IW)
-    const room = Math.max(4, IW - vlen(hint) - 1)
-    return padE(cut(left, room), room) + dim(hint)
-  })
-  const sep = dim('─'.repeat(IW))
-  const blanks = Math.max(0, IH - (header.length + info.length + 1 + menuRows.length + 1))
-  // 空白放在菜单与底栏之间:内容顶部紧凑、底栏贴底(和参考图的观感一致)
-  const rows = [
+  // 多余行分一半放在状态与菜单之间、一半放在菜单与底栏之间,免得中间一个空洞
+  const blanks = Math.max(0, IH - (header.length + menuRows.length + 3))
+  const top = Math.ceil(blanks / 2)
+  return [
     ...header,
-    ...info,
-    sep,
+    ...Array(top).fill(''),
     ...menuRows,
-    ...Array(blanks).fill(''),
+    ...Array(blanks - top).fill(''),
+    dim('─'.repeat(IW)),
     footer(IW),
-  ]
-  return rows.slice(0, IH)
+  ].slice(0, IH)
 }
 
 /** 供应商屏 */
@@ -623,8 +643,8 @@ function box(body, W, H, title) {
  * 所有动作键大小写都接受(见 handleKey),写大写会误导人。
  */
 const HINTS = {
-  main: '1-7 选择   ↑↓ 导航   Enter 确认   q 退出',
-  providers: 'Enter 当前   m 选模型   n 手填模型   x 鉴权   a 新增   e 改   d 删   Esc 返回',
+  main: '↑↓ 选择   Enter 启动/进入   a 加 agent   e 改   x 删   q 退出',
+  providers: 'Enter 当前   m 选模型   n 手填   x 鉴权   t 探活   a 新增   e 改   d 删   Esc 返回',
   models: '↑↓ 选择   Enter 使用   i 手动输入   Esc 返回',
   keys: '↑↓ 选择   a 录入   d 删除   Esc 返回',
   doctor: '↑↓ 滚动   r 重跑   Esc 返回',
@@ -732,26 +752,33 @@ async function prompt(question, { hidden = false, hint = null } = {}) {
   }
 }
 
-async function actionLaunch() {
+/**
+ * 启动一个 agent。所有 agent 共用同一套环境重定向与供应商注入,
+ * 只是"启动命令"不同(见 launch.mjs 的 agentCommand)。
+ */
+async function actionLaunchAgent(agent) {
   const p = currentProvider()
-  const bin = claudeBinary()
-  if (!bin) { state.message = { t: `本平台(${PLAT})没有 Claude Code,请先构建`, lv: 'fail' }; return }
   if (!p.model) {
-    state.message = { t: `${p.name} 还没选模型 —— 按 2 进供应商屏,再按 M 获取并选择`, lv: 'fail' }
+    state.message = { t: `${p.name} 还没选模型 —— 进「供应商与模型」按 m 获取或 n 手填`, lv: 'fail' }
     return
   }
   let secret = null
   if (p.key_ref) {
     const r = await getSecret(p.key_ref)
-    if (!r.ok) { state.message = { t: `取不到密钥:${r.reason} —— 请先按 4 录入`, lv: 'fail' }; return }
+    if (!r.ok) { state.message = { t: `取不到密钥:${r.reason} —— 进「密钥管理」录入`, lv: 'fail' }; return }
     secret = r.value
   }
+  const spec = agentCommand(agent, { providerId: p.id })
+  if (!spec.bin) {
+    state.message = { t: `agent「${agent.name}」没有可用的启动命令(检查它的 command 字段)`, lv: 'fail' }
+    return
+  }
   state.message = null
-  exitScreen()                       // 把终端还给 Claude Code
+  exitScreen()                       // 把终端交给它
   const env = buildEnv(p, secret)
   const wd = state.workdir?.dir || path.join(DATA, 'workspace')
   try { fs.mkdirSync(wd, { recursive: true }) } catch {}
-  const child = spawn(bin, [], { cwd: wd, env, stdio: 'inherit' })
+  const child = spawn(spec.bin, spec.args, { cwd: wd, env, stdio: 'inherit' })
   // 必须同时监听 error:否则 spawn 失败时 exit 不触发,面板会永久挂起
   let spawnErr = null
   await new Promise((res) => {
@@ -761,8 +788,68 @@ async function actionLaunch() {
   enterScreen()
   state.message = spawnErr
     ? { t: `启动失败:${spawnErr.message}`, lv: 'fail' }
-    : { t: 'Claude Code 已退出', lv: 'ok' }
+    : { t: `${agent.name} 已退出`, lv: 'ok' }
   render()   // 异步动作返回后必须自己重绘:handleKey 里的那次 render 早就跑完了
+}
+
+/** a:添加一个自定义 agent(任意命令行) */
+async function actionAddAgent() {
+  try {
+    const name = await prompt('新 agent · 名称:')
+    if (!name) { state.message = { t: '已取消', lv: 'warn' }; return }
+    const desc = await prompt('新 agent · 一句话说明(会显示在菜单里):', { hint: '直接回车 = 留空' })
+    const command = await prompt('新 agent · 命令:', {
+      hint: '会在当前工作目录、带着盘上的环境变量执行;例:aichat 或 python3 ~/my_agent.py',
+    })
+    if (!command) { state.message = { t: '命令为空,已取消', lv: 'warn' }; return }
+    const base = slug(name) || 'agent'
+    const used = new Set((state.agents || []).map((a) => a.id))
+    let id = base, n = 1
+    while (used.has(id)) id = `${base}-${++n}`
+    state.agents = [...(state.agents || []), { id, name, desc, kind: 'cmd', command, custom: true }]
+    saveAgents(state.agents)
+    state.cursor = (state.agents.length - 1)
+    state.message = { t: `已添加「${name}」`, lv: 'ok' }
+  } catch (e) {
+    state.message = { t: '添加失败:' + (e && e.message ? e.message : e), lv: 'fail' }
+  } finally { render() }
+}
+
+/** e:改选中 agent 的名称/说明/命令(内置的也能改说明,但不能改启动方式) */
+async function actionEditAgent() {
+  const it = mainItems()[state.cursor]
+  const a = it && it.agent
+  if (!a) { state.message = { t: '请先把光标移到某个 agent 上', lv: 'warn' }; render(); return }
+  try {
+    const name = await prompt(`新名称(当前 ${a.name}):`, { hint: '直接回车 = 不修改' })
+    const desc = await prompt(`新说明(当前 ${a.desc || '无'}):`, { hint: '直接回车 = 不修改' })
+    const command = a.kind === 'cmd'
+      ? await prompt(`新命令(当前 ${a.command || '无'}):`, { hint: '直接回车 = 不修改' })
+      : null
+    if (!name && !desc && !command) { state.message = { t: '没有改动', lv: 'warn' }; return }
+    const list = (state.agents || []).map((x) => x.id === a.id
+      ? { ...x, ...(name ? { name } : {}), ...(desc ? { desc } : {}), ...(command ? { command } : {}) }
+      : x)
+    state.agents = list
+    saveAgents(list)
+    state.message = { t: `已更新「${name || a.name}」`, lv: 'ok' }
+  } catch (e) {
+    state.message = { t: '更新失败:' + (e && e.message ? e.message : e), lv: 'fail' }
+  } finally { render() }
+}
+
+/** x:删除选中 agent(只允许删自己加的) */
+function actionDeleteAgent() {
+  const it = mainItems()[state.cursor]
+  const a = it && it.agent
+  if (!a) { state.message = { t: '请先把光标移到某个 agent 上', lv: 'warn' }; render(); return }
+  if (a.builtin) { state.message = { t: `「${a.name}」是内置 agent,不能删;可以按 e 改说明`, lv: 'warn' }; render(); return }
+  const list = (state.agents || []).filter((x) => x.id !== a.id)
+  state.agents = list
+  saveAgents(list)
+  state.cursor = Math.max(0, Math.min(state.cursor, list.length - 1))
+  state.message = { t: `已删除「${a.name}」`, lv: 'ok' }
+  render()
 }
 
 async function actionProbe() {
@@ -1108,7 +1195,6 @@ function actionDoctor() {
 }
 
 // ───────────────────────── 按键处理 ─────────────────────────
-const MAIN_ITEMS = 7
 function handleKey(s) {
   if (state.inputLock) return
   if (s === '\x03') { quit(); return }   // Ctrl-C
@@ -1122,10 +1208,14 @@ function handleKey(s) {
   if (state.message) state.message = null
 
   if (state.screen === 'main') {
-    if (up) state.cursor = (state.cursor + MAIN_ITEMS - 1) % MAIN_ITEMS
-    else if (down) state.cursor = (state.cursor + 1) % MAIN_ITEMS
-    else if (s >= '1' && s <= String(MAIN_ITEMS)) { state.cursor = +s - 1; doMain() }
+    const N = mainItems().length
+    if (up) state.cursor = (state.cursor + N - 1) % N
+    else if (down) state.cursor = (state.cursor + 1) % N
+    else if (s >= '1' && s <= '9' && +s <= N) { state.cursor = +s - 1; doMain() }
     else if (enter) doMain()
+    else if (s === 'a' || s === 'A') actionAddAgent()
+    else if (s === 'e' || s === 'E') actionEditAgent()
+    else if (s === 'x' || s === 'X') actionDeleteAgent()
     else if (s === 'q' || s === 'Q' || esc) quit()
   } else if (state.screen === 'providers') {
     const n = state.cfg.providers.length
@@ -1135,6 +1225,7 @@ function handleKey(s) {
     else if (s === 'm' || s === 'M') actionPickModel()
     else if (s === 'n' || s === 'N') actionSetModelManual()
     else if (s === 'x' || s === 'X') actionToggleAuth()
+    else if (s === 't' || s === 'T') actionProbe()
     else if (s === 'a' || s === 'A') actionAddProvider()
     else if (s === 'e' || s === 'E') actionEditProvider()
     else if (s === 'd' || s === 'D') actionDeleteProvider()
@@ -1175,17 +1266,19 @@ function kIndexForProvider(pi) {
   return i >= 0 ? i : 0
 }
 
+/** 回车:agent 就启动,配置项就进对应的屏 —— 按 id 分派,不再依赖写死的序号 */
 function doMain() {
-  if (state.cursor === 0) { actionLaunch(); return }
-  if (state.cursor === 1) {
+  const it = mainItems()[state.cursor]
+  if (!it) return
+  if (it.agent) { actionLaunchAgent(it.agent); return }
+  if (it.id === 'providers') {
     const i = state.cfg.providers.findIndex((p) => p.id === state.cfg.current)
     state.pCursor = i >= 0 ? i : 0
     state.screen = 'providers'
-  } else if (state.cursor === 2) actionProbe()
-  else if (state.cursor === 3) { state.screen = 'keys'; state.kCursor = 0 }
-  else if (state.cursor === 4) { state.screen = 'doctor'; actionDoctor() }
-  else if (state.cursor === 5) state.screen = 'about'
-  else if (state.cursor === 6) actionSetWorkdir()
+  } else if (it.id === 'workdir') actionSetWorkdir()
+  else if (it.id === 'keys') { state.screen = 'keys'; state.kCursor = 0 }
+  else if (it.id === 'doctor') { state.screen = 'doctor'; actionDoctor() }
+  else if (it.id === 'about') state.screen = 'about'
 }
 
 function quit() {
@@ -1198,6 +1291,7 @@ function quit() {
 export async function runTUI(opts = {}) {
   state.cfg = loadProviders()
   state.workdir = opts.workdir || resolveWorkdir()
+  state.agents = loadAgents()
   // 兼容旧写法:确保 current 有效
   if (!state.cfg.providers.some((p) => p.id === state.cfg.current)) {
     state.cfg.current = state.cfg.providers[0].id
@@ -1224,7 +1318,8 @@ if (RENDER_ONLY) {
     state.cfg.current = state.cfg.current || state.cfg.providers[0].id
     const scr = a[2] || 'main'
     state.screen = scr
-    state.workdir = resolveWorkdir()   // 预览也要有工作目录,否则 WORKDIR 行是空的
+    state.workdir = resolveWorkdir()   // 预览也要有工作目录,否则状态栏是空的
+    state.agents = loadAgents()
     if (scr === 'main') await ensureBalance()   // 让预览里的余额是真实值
     if (scr === 'models') {                     // 预览也走与真实流程一致的逻辑
       const p = currentProvider()

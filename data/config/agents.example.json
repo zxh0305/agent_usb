@@ -1,0 +1,19 @@
+{
+  "$comment": "Agent 注册表。kind 三种:claude=盘内 Claude Code / chat=内置轻量对话 / cmd=任意命令。自定义的写进 agents.json(不入库)。",
+  "agents": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "desc": "编码 · 操作文件 · 批量",
+      "kind": "claude",
+      "builtin": true
+    },
+    {
+      "id": "chat",
+      "name": "对话助手",
+      "desc": "快速问答 · 文案 · 翻译",
+      "kind": "chat",
+      "builtin": true
+    }
+  ]
+}

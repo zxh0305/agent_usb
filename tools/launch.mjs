@@ -48,6 +48,48 @@ function passthroughRoot() {
   return IS_WIN ? p : '/'
 }
 
+// ────────────────────── Agent 注册表 ──────────────────────
+const AGENTS_FILE = path.join(DATA, 'config', 'agents.json')
+
+/** 首次运行时从模板生成 agents.json(和 providers 一样,用户自己那份不入库) */
+export function ensureAgentsConfig() {
+  const dst = AGENTS_FILE
+  if (fs.existsSync(dst)) return
+  const src = path.join(DATA, 'config', 'agents.example.json')
+  if (fs.existsSync(src)) {
+    fs.mkdirSync(path.dirname(dst), { recursive: true })
+    fs.copyFileSync(src, dst)
+  }
+}
+
+/**
+ * 读注册表。**内置 agent 永远是保底项**:即使用户把 agents.json 删了或改坏了,
+ * 面板也不会变成一个没有任何 agent 可用的空壳。
+ */
+export function loadAgents() {
+  ensureAgentsConfig()
+  const builtin = [
+    { id: 'claude', name: 'Claude Code', desc: '编码 · 操作文件 · 批量', kind: 'claude', builtin: true },
+    { id: 'chat', name: '对话助手', desc: '快速问答 · 文案 · 翻译', kind: 'chat', builtin: true },
+  ]
+  let list = []
+  try {
+    const j = JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8'))
+    if (Array.isArray(j.agents)) list = j.agents
+  } catch { /* 坏掉就用内置 */ }
+  const out = []
+  for (const b of builtin) out.push(list.find((a) => a.id === b.id) || b)
+  for (const a of list) if (a && a.id && !out.some((x) => x.id === a.id)) out.push(a)
+  return out
+}
+
+export function saveAgents(agents) {
+  fs.writeFileSync(AGENTS_FILE, JSON.stringify({
+    $comment: 'Agent 注册表。kind:claude=盘内 Claude Code / chat=内置轻量对话 / cmd=任意命令。',
+    agents,
+  }, null, 2) + '\n')
+}
+
 // ────────────────────── 工作目录 ──────────────────────
 const DAEMON_FILE = path.join(DATA, 'config', 'daemon.json')
 
@@ -198,6 +240,27 @@ export function normalizeBaseUrl(raw) {
     .replace(/\/v1$/i, '')
     .replace(/\/+$/, '')
   return { url, changed: url !== before }
+}
+
+/**
+ * 把一个 agent 定义翻译成"怎么启动"。
+ * 三种 kind:
+ *   claude —— 盘内的 Claude Code 原生二进制(带工具,能操作文件)
+ *   chat   —— 内置轻量对话助手(不带工具)
+ *   cmd    —— 任意命令,交给系统 shell 执行(用户想接什么就接什么)
+ */
+export function agentCommand(agent, { providerId = null } = {}) {
+  const kind = agent.kind || 'cmd'
+  if (kind === 'claude') return { bin: claudeBinary(), args: [] }
+  if (kind === 'chat') {
+    const args = [path.join(HERE, 'chat.mjs')]
+    if (providerId) args.push('--provider', providerId)
+    return { bin: process.execPath, args }
+  }
+  const cmd = agent.command
+  if (!cmd) return { bin: null, args: [] }
+  if (IS_WIN) return { bin: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', cmd] }
+  return { bin: '/bin/sh', args: ['-c', cmd] }
 }
 
 export function buildEnv(provider, secret) {
@@ -387,7 +450,8 @@ async function main() {
 
   // 没有显式指令、又是交互终端 → 打开交互面板(双击启动走的就是这条路)
   const hasProviderFlag = own.some((a) => a === '--provider' || a === '-P')
-  if (!hasProviderFlag && !own.includes('--check') && !own.includes('--no-tui') && process.stdin.isTTY) {
+  const hasAgentFlag = own.includes('--agent')
+  if (!hasProviderFlag && !hasAgentFlag && !own.includes('--check') && !own.includes('--no-tui') && process.stdin.isTTY) {
     const { runTUI } = await import('./tui.mjs')
     await runTUI({ workdir })
     return
@@ -444,21 +508,31 @@ async function main() {
   }
 
   // 启动
-  const bin = claudeBinary()
-  if (!bin) { header(); die(`本平台(${PLAT})没有可用的 Claude Code。\n  用 tools/build-local.sh 构建后拷入 app/claude/`) }
+  const agents = loadAgents()
+  const ai = own.findIndex((a) => a === '--agent')
+  const agentId = ai >= 0 ? own[ai + 1] : null
+  const agent = (agentId && agents.find((a) => a.id === agentId)) || agents[0]
+  const spec = agentCommand(agent, { providerId: provider.id })
+  if (!spec.bin) {
+    die(`agent「${agent.name}」没有可用的启动命令` +
+        (agent.kind === 'cmd' ? '\n  它的 command 字段是空的,去 data/config/agents.json 补上' : ''))
+  }
 
   header()
-  console.log(`\n  供应商  ${C.b(provider.name)}  ${C.dim('(' + provider.id + ')')}`)
+  console.log(`\n  Agent   ${C.b(agent.name)}  ${C.dim('(' + (agent.kind || 'cmd') + ')')}`)
+  console.log(`  供应商  ${C.b(provider.name)}  ${C.dim('(' + provider.id + ')')}`)
   console.log(`  模型    ${C.b(provider.model)}   ${C.dim('· 小模型 ' + (provider.haiku_model || provider.model))}`)
   console.log(`  工作区  ${C.dim(workdir.dir)}  ${C.dim('(' + workdir.src + ')')}`)
   console.log(`  密钥    ${secret ? C.g('● 已注入') : C.y('○ 无')}`)
-  console.log(`\n  ${C.dim('启动 Claude Code…(首次会问是否信任该工作目录,选 yes 即可)')}\n`)
+  console.log(`\n  ${C.dim('启动 ' + agent.name + ' …（首次会问是否信任该工作目录,选 yes 即可）')}\n`)
 
   fs.mkdirSync(TMP, { recursive: true })
   try { fs.mkdirSync(workdir.dir, { recursive: true }) } catch {}
 
   const env = buildEnv(provider, secret)
-  const child = spawn(bin, rest, {
+  // 只有 claude / chat 接受透传参数;cmd 是整条命令,再塞参数会变成 $0 之类
+  const extra = agent.kind === 'claude' || agent.kind === 'chat' ? rest : []
+  const child = spawn(spec.bin, [...spec.args, ...extra], {
     cwd: workdir.dir,
     env,
     stdio: 'inherit',
