@@ -433,6 +433,9 @@ function bodyProviders(IW) {
     out.push(dim('─'.repeat(IW)))
     out.push(`  ${dim('端点')}  ${cut(cur.base_url, IW - 8)}`)
     out.push(`  ${dim('主模型')} ${cur.model || '(未选)'}    ${dim('小模型')} ${cur.haiku_model || cur.model || '(未选)'}`)
+    out.push(`  ${dim('模型列表')} ${Array.isArray(cur.models) && cur.models.length
+      ? cur.models.length + ' 个 · 按 m 直接选'
+      : dim('未记录 · 按 n 手填一个,之后就会被记住')}`)
     out.push(`  ${dim('鉴权')}   ${cur.auth === 'x-api-key' ? 'x-api-key 头' : 'Authorization: Bearer'}   ${dim('(按 x 切换)')}    ${dim('请求路径')} ${cut(`${cur.base_url}/v1/messages`, Math.max(10, IW - 46))}`)
     if (cur.note) out.push(`  ${yellow('注意')}  ${cut(cur.note, IW - 8)}`)
     if (cur.doc) out.push(`  ${dim('文档')}  ${dim(cut(cur.doc, IW - 8))}`)
@@ -564,7 +567,7 @@ function box(body, W, H, title) {
  */
 const HINTS = {
   main: '1-6 选择   ↑↓ 导航   Enter 确认   q 退出',
-  providers: '↑↓ 选择   m 拉模型   n 手填   x 鉴权   a 新增   e 改   d 删   Esc 返回',
+  providers: 'Enter 当前   m 选模型   n 手填模型   x 鉴权   a 新增   e 改   d 删   Esc 返回',
   models: '↑↓ 选择   Enter 使用   i 手动输入   Esc 返回',
   keys: '↑↓ 选择   a 录入   d 删除   Esc 返回',
   doctor: '↑↓ 滚动   r 重跑   Esc 返回',
@@ -800,22 +803,35 @@ function openModelPicker(p, found) {
   state.screen = 'models'
 }
 
-/** m:获取该供应商的模型列表。拉不到也把界面打开 —— 里面第一项就是手动输入 */
+/** m:选择模型。优先用"本地记住的列表",没有再联网拉 ——
+ *  很多自建网关根本没有列模型接口,联网拉只会白等。 */
 async function actionPickModel() {
   const p = state.cfg.providers[state.pCursor]
   if (!p) return
+  if (Array.isArray(p.models) && p.models.length) {
+    state.message = null
+    openModelPicker(p, {
+      list: p.models.map((id) => ({ id, label: '', context: null })),
+      url: `本地记住的列表(${p.models.length} 个,按 n 可继续添加)`,
+    })
+    render()
+    return
+  }
   state.message = { t: `正在从 ${cut(p.base_url, 50)} 获取模型…`, lv: 'info' }
   render()
   let secret = null
   if (p.key_ref) { const r = await getSecret(p.key_ref); if (r.ok) secret = r.value }
   const found = await fetchModels(p, secret)
   if (found.ok) {
+    // 拉到的列表也记下来,下次就不必联网了
+    p.models = [...new Set([...(p.models || []), ...found.list.map((m) => m.id)])]
+    saveProviders(state.cfg)
     state.message = null
     openModelPicker(p, found)
   } else {
     // 不在这里失败:很多自建网关没有列模型接口,手动输入才是主路径
     openModelPicker(p, { list: [], url: '' })
-    state.message = { t: `该接口没能列出模型(${cut(found.reason, 46)})—— 选第一项手动输入`, lv: 'warn' }
+    state.message = { t: `该接口没能列出模型(${cut(found.reason, 40)})—— 选第一项手动输入`, lv: 'warn' }
   }
   render()
 }
@@ -834,6 +850,8 @@ async function actionSetModelManual() {
     p.model = m
     // 自建接口通常只服务一个模型;四档全指向它,免得后台任务发出不认识的模型名
     p.haiku_model = m
+    // 记进本地列表:下次按 m 就能直接选,不用再手打(这些网关大多没有列模型接口)
+    p.models = [...new Set([...(p.models || []), m])]
     saveProviders(state.cfg)
     state.message = { t: `${p.id} 的模型已设为 ${m}`, lv: 'ok' }
     if (state.screen === 'models') state.screen = 'providers'
@@ -1110,17 +1128,20 @@ if (RENDER_ONLY) {
     const scr = a[2] || 'main'
     state.screen = scr
     if (scr === 'main') await ensureBalance()   // 让预览里的余额是真实值
-    if (scr === 'models') {                     // 预览也真实拉一次模型列表
+    if (scr === 'models') {                     // 预览也走与真实流程一致的逻辑
       const p = currentProvider()
-      let sec = null
-      if (p.key_ref) { const r = await getSecret(p.key_ref); if (r.ok) sec = r.value }
-      const f = await fetchModels(p, sec)
-      // 与真实流程保持一致:拉不到就是空列表,界面靠"手动输入"那一行兜底
-      state.models = {
-        providerId: p.id,
-        list: f.ok ? f.list : [],
-        url: f.ok ? f.url : '',
-        cursor: 0,
+      if (Array.isArray(p.models) && p.models.length) {
+        state.models = {
+          providerId: p.id,
+          list: p.models.map((id) => ({ id, label: '', context: null })),
+          url: `本地记住的列表(${p.models.length} 个,按 n 可继续添加)`,
+          cursor: 0,
+        }
+      } else {
+        let sec = null
+        if (p.key_ref) { const r = await getSecret(p.key_ref); if (r.ok) sec = r.value }
+        const f = await fetchModels(p, sec)
+        state.models = { providerId: p.id, list: f.ok ? f.list : [], url: f.ok ? f.url : '', cursor: 0 }
       }
     }
     const lines = (() => {
