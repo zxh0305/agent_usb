@@ -32,3 +32,6 @@ data/config/providers.json
 
 # 用户的 agent 注册表(可能含自己的私有命令),不入库;仓库只带 example
 data/config/agents.json
+
+# Claude Code 本地会话设置(权限白名单等,属本机配置)
+.claude/
