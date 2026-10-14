@@ -27,6 +27,7 @@ import readline from 'node:readline'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { getSecret } from './secrets.mjs'
+import { installClaudeCode } from './install-cc.mjs'
 
 // ────────────────────────── 盘根与平台 ──────────────────────────
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -637,7 +638,7 @@ function header(row) {
   console.log(C.cyan('  │') + padTo(`  RUNTIME   node ${process.version}  (${PLAT || '未知平台'})`, 62) + C.cyan('│'))
   console.log(C.cyan('  │') + padTo(`  APP       claude-code ${ver}`, 62) + C.cyan('│'))
   console.log(C.cyan('  │') + padTo(`  盘剩余    ${freeSpace()}`, 62) + C.cyan('│'))
-  if (!bin) console.log(C.cyan('  │') + padTo(C.r(`  ⚠ 本平台(${PLAT})的 Claude Code 未安装,请先跑 tools/build-local.sh`), 62) + C.cyan('│'))
+  if (!bin) console.log(C.cyan('  │') + padTo(C.y(`  ⚠ Claude Code 未安装 —— 面板选中它会自动下载(或跑 tools/build-local.sh)`), 62) + C.cyan('│'))
   console.log(C.cyan('  └' + '─'.repeat(62) + '┘'))
 }
 
@@ -735,7 +736,37 @@ async function main() {
   const ai = own.findIndex((a) => a === '--agent')
   const agentId = ai >= 0 ? own[ai + 1] : null
   const agent = (agentId && agents.find((a) => a.id === agentId)) || agents[0]
-  const spec = prepareAgent(agent, { provider, secret })
+  let spec = prepareAgent(agent, { provider, secret })
+
+  // ★ Claude Code 未安装:命令行路径同样自动下载(纯文本进度条),不再直接拦死。
+  //   面板(TUI)路径的进度条在 tui.mjs 里,走的是同一个安装器。
+  if (!spec.bin && agent.kind === 'claude' && !claudeBinary()) {
+    console.log(`\n  ${C.y('!')} 本平台的 Claude Code 未安装,开始自动下载安装(约 100~250MB)…\n`)
+    const mb = (n) => (n == null ? '?' : (n / 1024 / 1024).toFixed(1))
+    const barOf = (p) => {
+      const W = 34
+      const fill = p == null ? 0 : Math.round(W * Math.max(0, Math.min(1, p)))
+      const pct = p == null ? ' -- ' : String(Math.round(p * 100)).padStart(3, ' ') + '%'
+      return `[${'█'.repeat(fill)}${'░'.repeat(W - fill)}] ${pct}`
+    }
+    const r = await installClaudeCode({
+      plat: PLAT, usbDir: USB,
+      onProgress: (i) => {
+        if (i.phase === 'meta') process.stdout.write(`\r  查询最新版本(${i.registry || ''})…\x1b[K`)
+        else if (i.phase === 'download' || i.phase === 'extract') {
+          const p = i.total ? i.got / i.total : null
+          process.stdout.write(`\r  ${i.phase === 'download' ? '下载' : '解压'} ${barOf(p)} ${mb(i.got)}/${mb(i.total)}MB\x1b[K`)
+        } else if (i.phase === 'done') process.stdout.write('\n')
+      },
+    })
+    if (!r.ok) {
+      die(`Claude Code 自动安装失败:${r.reason}\n\n` +
+          `  也可以在有网的电脑上跑 ${C.b('tools/build-local.sh')} 构建后拷入盘内`)
+    }
+    ok(`Claude Code ${r.version} 已装好(${r.sizeMB}MB)`)
+    spec = prepareAgent(agent, { provider, secret })
+  }
+
   if (!spec.bin) {
     die(`agent「${agent.name}」没有可用的启动命令` +
         (agent.kind === 'cmd' ? '\n  它的 command 字段是空的,去 data/config/agents.json 补上' : ''))

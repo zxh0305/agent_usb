@@ -67,7 +67,7 @@ if (fs.existsSync(nodeBin)) {
     (p.error && p.error.code) || `退出码 ${p.status}`,
     '若为 EACCES/EPERM,说明该挂载点了 noexec。兜底:把 runtime 拷到本地临时目录再跑')
 } else {
-  check('运行时 node 缺失', 'fail', `没有 ${path.relative(USB, nodeBin)}`, '跑 tools/build-local.sh 构建后拷入')
+  check('运行时 node 缺失', 'warn', `没有 ${path.relative(USB, nodeBin)}`, '下次启动会自动下载进盘(claude.sh);或跑 tools/build-local.sh 构建后拷入')
 }
 
 // ── 4. Claude Code ──
@@ -85,7 +85,7 @@ if (fs.existsSync(cc)) {
     others.length ? others.map((n) => n.replace('claude-code-', '')).join(', ') : '只有本平台,插到别的系统会跑不起来',
     others.length ? null : 'build-local.sh 里加上目标平台再构建')
 } else {
-  check('Claude Code 缺失', 'fail', `没有 ${path.relative(USB, cc)}`, '跑 tools/build-local.sh 构建后拷入')
+  check('Claude Code 缺失', 'warn', `没有 ${path.relative(USB, cc)}`, '面板选中 Claude Code 会自动下载安装;或跑 node tools/install-cc.mjs / build-local.sh')
 }
 
 // ── 5. 软链接扫描(exFAT 上必须为 0) ──

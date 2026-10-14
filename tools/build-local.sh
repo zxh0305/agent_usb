@@ -18,7 +18,8 @@
 set -e
 
 USB=$(cd "$(dirname "$0")/.." && pwd)
-NODE_VER=${NODE_VER:-24.21.0}
+# node 版本的唯一维护处是 tools/NODE_VER(claude.sh / claude.bat 的自动下载也读它)
+NODE_VER=${NODE_VER:-$(cat "$(dirname "$0")/NODE_VER" 2>/dev/null || echo 24.21.0)}
 CC_VER=${CC_VER:-2.1.295}
 WORK=${WORK:-/tmp/usb-agent-build}
 PLATS=${*:-darwin-arm64 win32-x64 linux-x64}

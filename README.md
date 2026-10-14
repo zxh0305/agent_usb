@@ -8,29 +8,45 @@
 ## 从零部署
 
 仓库里只有源码 —— 运行时和 Claude Code 二进制不入库(体积大,且可重建)。
-所以克隆之后需要跑一次构建:
+克隆之后**直接启动即可,电脑上什么都没装也行**:
+
+- 启动器发现没有可用的 node(盘内没有、宿主机也没有或太旧)→ 当场自动下载
+  一份 node 进盘里(约 30~50MB,带进度条,官方源不通自动换 npmmirror 镜像);
+- 面板里选中 Claude Code 时,若本平台的二进制缺失 → 自动从 npm 下载安装,
+  进度条可见(装到盘内 `app/`,只装当前平台,之后离线可用)。
 
 ```sh
 git clone https://github.com/zxh0305/agent_usb.git agent_usb
 cd agent_usb
 
-# 1. 在本地磁盘构建运行时与 Claude Code,并拷进当前目录
-#    (这一步需要联网;默认构建 darwin-arm64 + win32-x64 + linux-x64)
-sh tools/build-local.sh
+# 1. 启动面板(首次会自动补齐 node / Claude Code,需要联网)
+sh tools/claude.sh
 
 # 2. 录入一个供应商密钥(以 DeepSeek 为例)
 node tools/secrets.mjs set deepseek
 
-# 3. 体检并启动
+# 3. 体检
 sh tools/doctor.sh --probe
-sh tools/claude.sh
 ```
 
-想把整个东西装到 U 盘上:直接把构建好的目录拷到盘里即可。
+想离线部署、或要给多个平台(Node 运行时 / 其他系统的 Claude Code)打包,再跑构建:
+
+```sh
+# 在本地磁盘构建运行时与 Claude Code,并拷进当前目录
+# (这一步需要联网;默认构建 darwin-arm64 + win32-x64 + linux-x64)
+sh tools/build-local.sh
+```
+
+也可以只装当前平台的 Claude Code:`node tools/install-cc.mjs`。
 `data/home/` 下的 Claude Code 配置会在**首次运行时自动补齐**,不需要手工准备。
 
 > **为什么不在库内放二进制**:Node 约 120MB/平台,Claude Code 约 240MB/平台,
-> 放进 git 会让仓库膨胀到 GB 级且无法有效增量;而这些都能用 `build-local.sh` 一键重建。
+> 放进 git 会让仓库膨胀到 GB 级且无法有效增量;而这些都能自动下载或一键重建。
+>
+> 自动下载的源:Claude Code 走 npm registry(依次尝试 registry.npmjs.org →
+> registry.npmmirror.com,可用 `USB_AGENT_NPM_REGISTRY` 指定,`USB_AGENT_CC_VER`
+> 固定版本);node 走官方发行包(nodejs.org → npmmirror 镜像,可用
+> `USB_AGENT_NODE_DIST` / `USB_AGENT_NODE_VER` 覆盖)。
 
 ---
 
@@ -63,6 +79,7 @@ tools\claude.bat
 | 体检 & 修复 | `sh tools/doctor.sh --clean --probe` |
 | 录入/更换密钥 | `sh tools/claude.sh` 前先 `node tools/secrets.mjs set <name>` |
 | 给 claude 传参数 | `sh tools/claude.sh -- -p "你的问题"` |
+| 只装 Claude Code(当前平台) | `node tools/install-cc.mjs` |
 | 重新构建运行时 | `sh tools/build-local.sh` |
 
 `--` 之后的参数会**原样传给 Claude Code**。例如非交互提问:

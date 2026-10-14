@@ -26,6 +26,7 @@ import {
 import {
   getSecret, setSecretEntry, removeSecretEntry, listSecretNames, hasPassfile,
 } from './secrets.mjs'
+import { installClaudeCode } from './install-cc.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PROVIDERS_FILE = path.join(DATA, 'config', 'providers.json')
@@ -52,6 +53,7 @@ const state = {
   agents: null,           // agent 注册表(loadAgents 读出)
   appName: null,          // 面板显示的名字(默认 REMON,可被 daemon.json 的 title 覆盖)
   inputLock: false,       // 正在用 readline 提问时,忽略自己的按键处理
+  installing: null,       // 正在自动安装 Claude Code:{ phase, pct, text, detail, version, registry, abort }
   active: false,
   cfg: null,
 }
@@ -408,7 +410,10 @@ function mainItems() {
   const keys = keyNames()
   return [
     ...(state.agents || []).map((a) => ({
-      id: 'agent:' + a.id, name: a.name, right: a.desc || '', agent: a,
+      id: 'agent:' + a.id, name: a.name,
+      // Claude Code 没装时,说明位直接告诉用户"回车就会装",而不是一条看不出原因的报错
+      right: a.kind === 'claude' && !claudeBinary() ? yellow('未安装 · 回车自动下载') : (a.desc || ''),
+      agent: a,
     })),
     { id: 'providers', name: '供应商与模型', right: `${cut(p.name, 20)} · ${p.model || '(未选模型)'}` },
     { id: 'workdir', name: '工作目录', right: shortenHome(state.workdir?.dir || '') },
@@ -626,6 +631,34 @@ function bodyDoctor(IW, IH) {
   return out
 }
 
+/**
+ * 安装屏:Claude Code 未装时选中它,当场下载安装(带进度条)。
+ * 干净克隆第一次跑就是这条路 —— 不能只说"未安装"把人拦在门外。
+ */
+function bodyInstall(IW, IH) {
+  const it = state.installing || { phase: 'meta', pct: null, text: '准备中…', detail: '', version: '', registry: '' }
+  const mb = (n) => (n == null ? '?' : (n / 1024 / 1024).toFixed(1))
+  const out = []
+  out.push('')
+  out.push(bold('  正在安装 Claude Code'))
+  out.push(dim(`  平台包  @anthropic-ai/claude-code-${PLAT || '?'}`))
+  out.push(dim(`  版本    ${it.version || '(查询中…)'}${it.registry ? dim(`   ·   ${it.registry}`) : ''}`))
+  out.push('')
+  const barW = Math.max(20, Math.min(IW - 12, 44))
+  const pct = typeof it.pct === 'number' ? Math.max(0, Math.min(1, it.pct)) : null
+  const fill = pct === null ? 0 : Math.round(barW * pct)
+  const bar = pct === null
+    ? yellow('░'.repeat(barW))
+    : green('█'.repeat(fill)) + dim('░'.repeat(barW - fill))
+  const pctTxt = pct === null ? ' -- ' : String(Math.round(pct * 100)).padStart(3, ' ') + '%'
+  out.push(`  [${bar}] ${pctTxt}`)
+  out.push(`  ${it.text || ''}${it.detail ? '   ' + dim(it.detail) : ''}`)
+  out.push('')
+  out.push(dim('  · 装到盘上的 app/ 里(只装本平台),之后离线也能用'))
+  out.push(dim('  · 下载量约几十到两百多 MB,取决于网速;可 Ctrl-C 取消'))
+  return out
+}
+
 // ───────────────────────── 边框与输出 ─────────────────────────
 function box(body, W, H, title) {
   const IW = innerWidth(W)
@@ -656,6 +689,7 @@ const HINTS = {
   keys: '↑↓ 选择   a 录入   d 删除   Esc 返回',
   doctor: '↑↓ 滚动   r 重跑   Esc 返回',
   about: 'Esc 返回',
+  install: '正在安装,请稍候…   Ctrl-C 取消',
 }
 
 function footer(IW) {
@@ -691,6 +725,7 @@ function render() {
     : state.screen === 'models' ? '选择模型'
     : state.screen === 'keys' ? '密钥'
     : state.screen === 'doctor' ? '体检'
+    : state.screen === 'install' ? '安装 Claude Code'
     : '关于'
   let body
   if (state.screen === 'main') {
@@ -700,6 +735,7 @@ function render() {
       : state.screen === 'models' ? bodyModels(IW, IH)
       : state.screen === 'keys' ? bodyKeys(IW)
       : state.screen === 'doctor' ? bodyDoctor(IW, IH)
+      : state.screen === 'install' ? bodyInstall(IW, IH)
       : bodyAbout(IW)
     while (body.length < IH - 2) body.push('')
     body.push(dim('─'.repeat(IW)))
@@ -760,6 +796,57 @@ async function prompt(question, { hidden = false, hint = null } = {}) {
 }
 
 /**
+ * 安装流程(全屏进度条)。返回安装结果;期间 Ctrl-C 只取消安装、不退出面板。
+ */
+async function runCcInstall() {
+  state.screen = 'install'
+  state.message = null
+  state.installing = { phase: 'meta', pct: null, text: '正在查询最新版本…', detail: '', version: '', registry: '', abort: false }
+  render()
+  const mb = (n) => (n == null ? '?' : (n / 1024 / 1024).toFixed(1))
+  const hostOf = (u) => { try { return new URL(u).host } catch { return '' } }
+  let lastPaint = 0
+  const r = await installClaudeCode({
+    plat: PLAT, usbDir: USB,
+    onProgress: (i) => {
+      const inst = state.installing
+      if (!inst) return
+      if (i.phase === 'meta') {
+        inst.phase = 'meta'; inst.pct = null
+        inst.text = '正在查询最新版本…'; inst.detail = ''
+        inst.registry = hostOf(i.registry || '')
+      } else if (i.phase === 'download') {
+        inst.phase = 'download'
+        inst.pct = i.total ? i.got / i.total : null
+        inst.text = '下载平台包'
+        inst.detail = `${mb(i.got)} / ${mb(i.total)} MB`
+        if (i.registry) inst.registry = hostOf(i.registry)
+      } else if (i.phase === 'extract') {
+        inst.phase = 'extract'
+        inst.pct = i.total ? i.got / i.total : null
+        inst.text = '解压并写入二进制'
+        inst.detail = `${mb(i.got)} / ${mb(i.total)} MB`
+        if (i.version) inst.version = i.version
+      } else if (i.phase === 'done') {
+        inst.phase = 'done'; inst.pct = 1
+        inst.text = '安装完成'; inst.detail = ''
+        if (i.version) inst.version = i.version
+      }
+      const now = Date.now()
+      if (inst.phase === 'done' || now - lastPaint > 120) {   // 限频重绘,进度高频回调不会刷屏
+        lastPaint = now
+        render()
+      }
+    },
+    shouldAbort: () => state.installing?.abort === true,
+  })
+  state.installing = null
+  state.screen = 'main'
+  render()
+  return r
+}
+
+/**
  * 启动一个 agent。所有 agent 共用同一套环境重定向与供应商注入,
  * 只是"启动命令"不同(见 launch.mjs 的 agentCommand)。
  */
@@ -775,9 +862,23 @@ async function actionLaunchAgent(agent) {
     if (!r.ok) { state.message = { t: `取不到密钥:${r.reason} —— 进「密钥管理」录入`, lv: 'fail' }; return }
     secret = r.value
   }
-  const spec = prepareAgent(agent, { provider: p, secret })
+  let spec = prepareAgent(agent, { provider: p, secret })
+  let installedInfo = null
+  // ★ Claude Code 未安装:不当场拦死,先自动下载安装(进度条见安装屏),装完接着启动。
+  //   干净克隆第一次选它走的就是这条路。
+  if (!spec.bin && agent.kind === 'claude' && !claudeBinary()) {
+    const r = await runCcInstall()
+    if (!r.ok) {
+      state.message = { t: r.cancelled ? '已取消安装 Claude Code' : `Claude Code 安装失败:${r.reason}`, lv: 'warn' }
+      render()
+      return
+    }
+    installedInfo = `Claude Code ${r.version} 已自动安装(${r.sizeMB}MB)`
+    spec = prepareAgent(agent, { provider: p, secret })
+  }
   if (!spec.bin) {
     state.message = { t: `agent「${agent.name}」没有可用的启动命令(检查它的 command 字段)`, lv: 'fail' }
+    render()
     return
   }
   state.message = null
@@ -796,7 +897,7 @@ async function actionLaunchAgent(agent) {
   enterScreen()
   state.message = spawnErr
     ? { t: `启动失败:${spawnErr.message}`, lv: 'fail' }
-    : { t: `${agent.name} 已退出`, lv: 'ok' }
+    : { t: installedInfo ? `${installedInfo} · ${agent.name} 已退出` : `${agent.name} 已退出`, lv: 'ok' }
   render()   // 异步动作返回后必须自己重绘:handleKey 里的那次 render 早就跑完了
 }
 
@@ -1205,6 +1306,11 @@ function actionDoctor() {
 // ───────────────────────── 按键处理 ─────────────────────────
 function handleKey(s) {
   if (state.inputLock) return
+  // 安装中:除了 Ctrl-C(= 取消安装,不是退出面板),其余按键一概忽略
+  if (state.installing) {
+    if (s === '\x03') state.installing.abort = true
+    return
+  }
   if (s === '\x03') { quit(); return }   // Ctrl-C
 
   // 只用方向键移动;不再让 j/k 兼作上下,免得和子屏的字母动作键冲突
@@ -1365,6 +1471,10 @@ if (RENDER_ONLY) {
         : scr === 'models' ? bodyModels(IW, IH)
         : scr === 'keys' ? bodyKeys(IW)
         : scr === 'about' ? bodyAbout(IW)
+        : scr === 'install' ? (state.installing = {
+            phase: 'download', pct: 0.47, text: '下载平台包',
+            detail: '47.3 / 98.6 MB', version: '2.1.295', registry: 'registry.npmjs.org', abort: false,
+          }, bodyInstall(IW, IH))
         : (state.doctorOut = '（示例）体检输出', bodyDoctor(IW, IH))
         while (body.length < IH - 2) body.push('')
         body.push(dim('─'.repeat(IW)))
@@ -1372,7 +1482,8 @@ if (RENDER_ONLY) {
       }
       return box(body, W, H, scr === 'main' ? 'P O R T A B L E   A S S I S T A N T'
         : scr === 'providers' ? '供应商' : scr === 'models' ? '选择模型'
-        : scr === 'keys' ? '密钥' : scr === 'about' ? '关于' : '体检')
+        : scr === 'keys' ? '密钥' : scr === 'about' ? '关于'
+        : scr === 'install' ? '安装 Claude Code' : '体检')
     })()
     process.stdout.write(lines.join('\n') + '\n')
     // 布局自检:每行**显示宽度**必须正好等于框宽。注意中文是双宽字符,
