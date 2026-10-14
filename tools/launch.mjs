@@ -753,6 +753,7 @@ async function main() {
       plat: PLAT, usbDir: USB,
       onProgress: (i) => {
         if (i.phase === 'meta') process.stdout.write(`\r  查询最新版本(${i.registry || ''})…\x1b[K`)
+        else if (i.phase === 'verify') process.stdout.write('\r  校验完整性…\x1b[K')
         else if (i.phase === 'download' || i.phase === 'extract') {
           const p = i.total ? i.got / i.total : null
           process.stdout.write(`\r  ${i.phase === 'download' ? '下载' : '解压'} ${barOf(p)} ${mb(i.got)}/${mb(i.total)}MB\x1b[K`)

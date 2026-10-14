@@ -13,24 +13,38 @@
  *   · tar.gz 用 zlib 流式解压 + 手写 tar 解析,边解边写,内存占用只有
  *     一个 chunk 的大小(二进制解压后有 200MB+,不能整个读进内存)。
  *   · 先写 .part 再改名:中途断网/Ctrl-C 不会留下一个"看似装好了"的半截文件。
- *   · registry 依次尝试 npmjs → npmmirror(国内网络常常只有镜像能通),
- *     可用环境变量 USB_AGENT_NPM_REGISTRY 指定首选项。
+ *   · registry 依次尝试 npmmirror(国内快)→ npmjs,可用环境变量
+ *     USB_AGENT_NPM_REGISTRY 指定首选项;下载完用元数据的 shasum 校验完整性。
  */
 import fs from 'node:fs'
 import path from 'node:path'
 import zlib from 'node:zlib'
+import crypto from 'node:crypto'
 
 const MB = 1024 * 1024
 
 function registries() {
-  // 环境变量可指定一个或多个(逗号分隔,按顺序优先);之后是内置的公网与国内镜像
+  // 默认 npmmirror 优先:实测国内网络官方源只有几十 KB/s,镜像能到 MB/s。
+  // 镜像内容用 registry 元数据自带的 shasum 校验(见 installClaudeCode),
+  // 所以镜像优先不会带来完整性风险;环境变量可指定一个或多个(逗号分隔)。
   const env = (process.env.USB_AGENT_NPM_REGISTRY || '')
     .split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)
-  const list = [...env, 'https://registry.npmjs.org', 'https://registry.npmmirror.com']
+  const list = [...env, 'https://registry.npmmirror.com', 'https://registry.npmjs.org']
   return [...new Set(list)]
 }
 
 const hostOf = (url) => { try { return new URL(url).host } catch { return url } }
+
+/** 文件的 sha1(npm 元数据里 dist.shasum 就是 sha1) */
+function sha1File(file) {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash('sha1')
+    fs.createReadStream(file)
+      .on('data', (c) => h.update(c))
+      .on('end', () => resolve(h.digest('hex')))
+      .on('error', reject)
+  })
+}
 
 /** 把字节流写到文件,边写边报进度;shouldAbort 返回 true 时抛 cancelled 错误 */
 async function downloadTo(file, url, { onProgress, shouldAbort }) {
@@ -239,6 +253,15 @@ export async function installClaudeCode({
     try {
       fs.mkdirSync(tmpDir, { recursive: true })
       await downloadTo(tgz, meta.dist.tarball, { onProgress, shouldAbort })
+      // 完整性校验:registry 元数据自带 dist.shasum(官方与 npmmirror 都有)。
+      // 有它兜底,默认镜像优先才没有内容被篡改的风险。
+      if (meta.dist.shasum) {
+        if (onProgress) onProgress({ phase: 'verify', registry: reg })
+        const got = await sha1File(tgz)
+        if (got !== meta.dist.shasum) {
+          throw new Error(`shasum 校验失败(期望 ${String(meta.dist.shasum).slice(0, 10)}…,实际 ${got.slice(0, 10)}…)`)
+        }
+      }
       fs.mkdirSync(destDir, { recursive: true })   // ★ 必须在解压前:.part 就写在这里面
       if (onProgress) onProgress({ phase: 'extract', got: 0, total: unpacked, version: ver, registry: reg })
       const r = await extractTarMember(
@@ -295,6 +318,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     plat, usbDir,
     onProgress: (i) => {
       if (i.phase === 'meta') process.stdout.write(`\r  查询版本(${hostOf(i.registry)})…\x1b[K`)
+      else if (i.phase === 'verify') process.stdout.write('\r  校验完整性…\x1b[K')
       else if (i.phase === 'download' || i.phase === 'extract') {
         const p = i.total ? i.got / i.total : null
         const mb = (n) => n == null ? '?' : (n / 1024 / 1024).toFixed(1)

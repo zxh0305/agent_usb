@@ -43,9 +43,10 @@ sh tools/build-local.sh
 > **为什么不在库内放二进制**:Node 约 120MB/平台,Claude Code 约 240MB/平台,
 > 放进 git 会让仓库膨胀到 GB 级且无法有效增量;而这些都能自动下载或一键重建。
 >
-> 自动下载的源:Claude Code 走 npm registry(依次尝试 registry.npmjs.org →
-> registry.npmmirror.com,可用 `USB_AGENT_NPM_REGISTRY` 指定,`USB_AGENT_CC_VER`
-> 固定版本);node 走官方发行包(nodejs.org → npmmirror 镜像,可用
+> 自动下载的源:Claude Code 走 npm registry(默认 npmmirror 镜像优先、官方兜底
+> ——实测国内网络官方源只有几十 KB/s,镜像能到 MB/s;下载完用元数据的 shasum
+> 校验完整性。可用 `USB_AGENT_NPM_REGISTRY` 指定、`USB_AGENT_CC_VER` 固定版本);
+> node 走官方发行包(npmmirror 镜像优先、nodejs.org 兜底,可用
 > `USB_AGENT_NODE_DIST` / `USB_AGENT_NODE_VER` 覆盖)。
 
 ---

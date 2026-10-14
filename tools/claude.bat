@@ -43,7 +43,7 @@ if not exist "%TMPN%" mkdir "%TMPN%"
 
 echo   本机没有可用的 node,开始下载到盘内,版本 v%NODE_VER% ...
 set "OK="
-for %%S in ("https://nodejs.org/dist" "https://npmmirror.com/mirrors/node") do (
+for %%S in ("https://npmmirror.com/mirrors/node" "https://nodejs.org/dist") do (
   if not defined OK (
     echo   源      %%~S/v%NODE_VER%/%ARCHIVE%
     curl.exe -fL --progress-bar -o "%TMPN%\%ARCHIVE%" "%%~S/v%NODE_VER%/%ARCHIVE%" && set "OK=1"

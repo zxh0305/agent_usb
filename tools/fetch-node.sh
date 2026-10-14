@@ -9,7 +9,7 @@
 # 用法: sh tools/fetch-node.sh [os] [arch]
 #   参数缺省 = 当前平台。成功时把 node 可执行文件的路径写到 stdout 最后一行。
 #
-# 下载源:默认 官方 nodejs.org → npmmirror 镜像 依次尝试;
+# 下载源:默认 npmmirror 镜像(国内快)→ 官方 nodejs.org 兜底;
 # 可用 USB_AGENT_NODE_DIST 指定一个或多个(逗号分隔),如内网镜像。
 # 版本默认取 tools/NODE_VER,可用 USB_AGENT_NODE_VER 覆盖。
 set -e
@@ -43,7 +43,7 @@ case "$PLAT" in
 esac
 ARCHIVE="node-v$NODE_VER-$DIST.$EXT"
 
-SITES=${USB_AGENT_NODE_DIST:-"https://nodejs.org/dist,https://npmmirror.com/mirrors/node"}
+SITES=${USB_AGENT_NODE_DIST:-"https://npmmirror.com/mirrors/node,https://nodejs.org/dist"}
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/usb-agent-node.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT

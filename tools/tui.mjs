@@ -821,6 +821,9 @@ async function runCcInstall() {
         inst.text = '下载平台包'
         inst.detail = `${mb(i.got)} / ${mb(i.total)} MB`
         if (i.registry) inst.registry = hostOf(i.registry)
+      } else if (i.phase === 'verify') {
+        inst.phase = 'verify'; inst.pct = null
+        inst.text = '校验完整性(sha1)'; inst.detail = ''
       } else if (i.phase === 'extract') {
         inst.phase = 'extract'
         inst.pct = i.total ? i.got / i.total : null
@@ -851,22 +854,11 @@ async function runCcInstall() {
  * 只是"启动命令"不同(见 launch.mjs 的 agentCommand)。
  */
 async function actionLaunchAgent(agent) {
-  const p = currentProvider()
-  if (!p.model) {
-    state.message = { t: `${p.name} 还没选模型 —— 进「供应商与模型」按 m 获取或 n 手填`, lv: 'fail' }
-    return
-  }
-  let secret = null
-  if (p.key_ref) {
-    const r = await getSecret(p.key_ref)
-    if (!r.ok) { state.message = { t: `取不到密钥:${r.reason} —— 进「密钥管理」录入`, lv: 'fail' }; return }
-    secret = r.value
-  }
-  let spec = prepareAgent(agent, { provider: p, secret })
+  // ★ 二进制优先:干净克隆第一次选 Claude Code 时,"选中即装"必须发生在
+  //   模型/密钥检查**之前** —— 否则新盘上密钥库还是空的,第一步就被
+  //   "取不到密钥"拦下,安装屏永远出不来(踩过的坑)。装完再提示去配密钥。
   let installedInfo = null
-  // ★ Claude Code 未安装:不当场拦死,先自动下载安装(进度条见安装屏),装完接着启动。
-  //   干净克隆第一次选它走的就是这条路。
-  if (!spec.bin && agent.kind === 'claude' && !claudeBinary()) {
+  if (agent.kind === 'claude' && !claudeBinary()) {
     const r = await runCcInstall()
     if (!r.ok) {
       state.message = { t: r.cancelled ? '已取消安装 Claude Code' : `Claude Code 安装失败:${r.reason}`, lv: 'warn' }
@@ -874,8 +866,21 @@ async function actionLaunchAgent(agent) {
       return
     }
     installedInfo = `Claude Code ${r.version} 已自动安装(${r.sizeMB}MB)`
-    spec = prepareAgent(agent, { provider: p, secret })
   }
+
+  const p = currentProvider()
+  if (!p.model) {
+    state.message = { t: `${p.name} 还没选模型 —— 进「供应商与模型」按 m 获取或 n 手填`, lv: 'fail' }
+    render()
+    return
+  }
+  let secret = null
+  if (p.key_ref) {
+    const r = await getSecret(p.key_ref)
+    if (!r.ok) { state.message = { t: `取不到密钥:${r.reason} —— 进「密钥管理」录入`, lv: 'fail' }; render(); return }
+    secret = r.value
+  }
+  const spec = prepareAgent(agent, { provider: p, secret })
   if (!spec.bin) {
     state.message = { t: `agent「${agent.name}」没有可用的启动命令(检查它的 command 字段)`, lv: 'fail' }
     render()
